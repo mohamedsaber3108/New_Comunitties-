@@ -75,6 +75,12 @@ Symbols: ✔ done - ◐ partial (see note) - ✘ not done
 | 37 | Background jobs viewer + retry; audit log | Admin | `/admin/outbox...`, `/admin/audit` | admin+ | ✔ | ✔ | A | ✔ | no |
 | 38 | Contact form | `/contact` | `POST /contact` | honeypot; throttled | ✔ | ✔ | A | ✔ | no |
 | 40 | Two-factor sign-in (TOTP + recovery codes), staff enforcement | Settings -> Two-factor, login code prompt | `/auth/mfa/*`, `POST /auth/login` (`mfaCode`) | secret AES-256-GCM at rest; code replay blocked; disable/regenerate need password + code; `REQUIRE_ADMIN_MFA` gates staff routes | ✔ | ✔ | A (RFC 6238 vectors), B | needs `MFA_ENCRYPTION_KEY` | no |
+| 41 | Realtime messages, read receipts, live notifications, unread badges | `/messages`, sidebar | `GET /stream` (SSE), `/messages`, `/me/unread` | stream needs a session; payloads carry ids only; per-user connection cap | ✔ | ✔ | A, B (two browsers) | Nginx: unbuffered (verified) | no |
+| 42 | Paid event tickets + admin event list/cancel with automatic refunds | `/events/:id`, Admin -> Events | `POST /events/:id/register`, `GET/PATCH /admin/events` | server price; seat hold 30 min; ticket only after verified webhook; refund releases seat | ✔ | ✔ | A, **M**, B (Paymob-off path) | ext (Paymob) | no |
+| 43 | Post images | Feed composer, post cards | `POST/DELETE /media/images`, `POST /posts` (`imageIds`) | max 4, own uploads only, magic-byte check, EXIF/GPS stripped, orphan cleanup | ✔ | ✔ | A, B | S3 in prod | no |
+| 44 | Google sign-in | Login / signup | `/auth/providers`, `/auth/google/start`, `/auth/google/callback` | state + PKCE + nonce; RS256 ID token verified; never bypasses MFA | ✔ | ✔ | A (**M** Google) | ext (Google client) | no |
+| 45 | Org team admins, roles, leaving, team analytics | Participation -> Organization teams | `/organizations/mine`, `/organizations/:id/team*`, `/organizations/:id/analytics` | owner-only admin grants; managers-only analytics | ✔ | ✔ | A, B | ✔ | no |
+| 46 | Account deletion with re-authentication, 30-day purge | Settings -> Data & privacy | `DELETE /users/me` | password (or recent Google sign-in) + MFA code; optional content removal | ✔ | ✔ | A, B | ✔ | no |
 | **Static / content** |
 | 39 | Home, explore, programs, rooms, partners catalogs, resources, FAQ, legal, 404 | public routes | (static content in `src/*.js`) | - | ✔ | ✔ | B (overflow, 404) | n/a | no |
 
@@ -96,11 +102,11 @@ Redirects: `/dashboard -> /home`, `/jobs -> /opportunities`
 ## 5. Capabilities the original brief mentioned that are **not** built (stated, not faked)
 | Capability | State | Why / next step |
 |---|---|---|
-| Real-time messaging / live notifications | ✘ | Polling only. Needs SSE/WebSocket + a pub/sub layer. |
-| Google OAuth | ✘ | Schema ready (`googleId`, `authProvider`); no flow. |
+| Multi-instance realtime | ✘ | SSE fan-out is in-process (single node). A second app instance needs PostgreSQL LISTEN/NOTIFY or Redis in `realtime.js`. |
+| Other social sign-in providers | ✘ | Google is built (row 44); others would follow the same OIDC module. |
 | MFA beyond TOTP (WebAuthn/passkeys, SMS) | ✘ | TOTP + recovery codes are built (row 40). |
-| Paid events / ticket sales | ✘ | API rejects `priceType: paid`. |
-| Uploads beyond avatars (post images, challenge files) | ✘ | Storage layer is ready; endpoints are not. |
+| Waitlists for paid events | ✘ | Paid events sell to capacity; no waitlist (free events have one). |
+| Non-image file uploads (challenge files, PDFs) | ✘ | Images for posts and avatars are built (row 43). |
 | Organization tenancy / analytics dashboards | ◐ | Teams exist; no tenant isolation or reporting. |
 | AI assistant / NomadAI | ✘ | Deliberately not faked; needs provider, policy and evaluation. |
 | Search engine (OpenSearch/Meilisearch) | ✘ | Postgres trigram indexes are used instead; revisit at scale. |

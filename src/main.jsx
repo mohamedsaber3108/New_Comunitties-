@@ -1455,6 +1455,12 @@ function Auth({ mode = "login", prompt, redirect }) {
             "بيانات الدخول غير صحيحة",
             "Incorrect email or password",
           ),
+          account_suspended: L("هذا الحساب موقوف", "This account is suspended"),
+          account_deleted: L("هذا الحساب محذوف", "This account was deleted"),
+          account_locked: L(
+            "محاولات كثيرة؛ حاول بعد ١٥ دقيقة",
+            "Too many attempts; try again in 15 minutes",
+          ),
           email_taken: L(
             "البريد الإلكتروني مستخدم بالفعل",
             "This email is already in use",
@@ -2917,7 +2923,16 @@ function EventDetail() {
                     : L("تسجيل مجاني", "Free registration")}
                 </div>
               </div>
-              {!(paid && own?.status === "registered") && (
+              {e.status === "cancelled" && (
+                <p className="billing-alert">
+                  <Info size={18} />
+                  {L(
+                    "أُلغيت هذه الفعالية. تُسترد قيمة التذاكر المدفوعة تلقائيًا.",
+                    "This event was cancelled. Paid tickets are refunded automatically.",
+                  )}
+                </p>
+              )}
+              {e.status !== "cancelled" && !(paid && own?.status === "registered") && (
                 <button
                   className="button button-accent"
                   onClick={action}
@@ -5694,6 +5709,69 @@ function AdminWorkflowPanel({ refresh, setRefresh }) {
   );
 }
 // Catalog controls: publish/archive a perk, pause it, or feature it.
+// Admin: every event with seats, revenue and a cancel action (wires
+// GET /admin/events and PATCH /admin/events/:id).
+function AdminEventsList({ refresh, setRefresh }) {
+  const [, L] = useText();
+  const { setToast, lang } = useApp();
+  const { data, loading, error } = useData("/admin/events", refresh);
+  async function cancel(ev) {
+    const msg =
+      ev.priceType === "paid"
+        ? L(
+            "إلغاء الفعالية واسترداد كل التذاكر المدفوعة؟",
+            "Cancel this event and refund every paid ticket?",
+          )
+        : L("إلغاء الفعالية وإبلاغ المسجلين؟", "Cancel this event and notify registrants?");
+    if (!window.confirm(msg)) return;
+    try {
+      const r = await api(`/admin/events/${ev.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status: "cancelled" }),
+      });
+      const failed = (r.refunds || []).filter((x) => !x.ok).length;
+      setToast(
+        failed
+          ? L(`أُلغيت الفعالية؛ فشل استرداد ${failed} تذكرة — راجع المدفوعات`, `Event cancelled; ${failed} refund(s) failed — check Payments`)
+          : L("أُلغيت الفعالية", "Event cancelled"),
+      );
+      setRefresh((x) => x + 1);
+    } catch (e) {
+      setToast(e.message);
+    }
+  }
+  return (
+    <div className="settings-form">
+      <h2>{L("الفعاليات", "Events")}</h2>
+      <Loadable loading={loading} error={error}>
+        {data?.items?.length ? (
+          data.items.map((ev) => (
+            <div className="admin-row" key={ev.id}>
+              <div>
+                <strong>{ev.title}</strong>
+                <small>
+                  {new Date(ev.startsAt).toLocaleString()} · {ev.status} ·{" "}
+                  {ev.registeredCount}/{ev.capacity} {L("مقعد", "seats")}
+                  {ev.waitlistCount ? ` · ${ev.waitlistCount} ${L("انتظار", "waitlisted")}` : ""}
+                  {ev.priceType === "paid"
+                    ? ` · ${formatEgp(ev.priceEgp, lang)} · ${L("صافي", "net")} ${formatEgp(ev.netRevenueEgp, lang)}`
+                    : ` · ${L("مجانية", "free")}`}
+                </small>
+              </div>
+              {ev.status === "published" && (
+                <button className="button button-outline danger" onClick={() => cancel(ev)}>
+                  {L("إلغاء الفعالية", "Cancel event")}
+                </button>
+              )}
+            </div>
+          ))
+        ) : (
+          <p className="muted">{L("لا توجد فعاليات بعد", "No events yet")}</p>
+        )}
+      </Loadable>
+    </div>
+  );
+}
 function AdminPerkCatalog({ refresh, setRefresh }) {
   const [, L] = useText();
   const { setToast, lang } = useApp();
@@ -6256,8 +6334,10 @@ function AdminUsersPanel({ currentUser }) {
   const [q, setQ] = useState("");
   const [submitted, setSubmitted] = useState("");
   const [refresh, setRefresh] = useState(0);
+  const [page, setPage] = useState(1);
+  useEffect(() => setPage(1), [submitted]);
   const { data, loading, error } = useData(
-    `/admin/users?q=${encodeURIComponent(submitted)}`,
+    `/admin/users?q=${encodeURIComponent(submitted)}&page=${page}`,
     refresh,
   );
   async function act(id, body) {
@@ -6341,12 +6421,28 @@ function AdminUsersPanel({ currentUser }) {
           </div>
         ))}
         {data && (
-          <small className="muted">
-            {L(
-              `${data.total} مستخدم`,
-              `${data.total} users · page ${data.page}/${data.totalPages}`,
-            )}
-          </small>
+          <div className="pagination-row">
+            <button
+              type="button"
+              disabled={page <= 1}
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+            >
+              {L("السابق", "Prev")}
+            </button>
+            <small className="muted">
+              {L(
+                `${data.total} مستخدم · صفحة ${data.page}/${Math.max(1, data.totalPages)}`,
+                `${data.total} users · page ${data.page}/${Math.max(1, data.totalPages)}`,
+              )}
+            </small>
+            <button
+              type="button"
+              disabled={page >= (data.totalPages || 1)}
+              onClick={() => setPage((p) => p + 1)}
+            >
+              {L("التالي", "Next")}
+            </button>
+          </div>
         )}
       </Loadable>
     </div>
@@ -6952,6 +7048,7 @@ function AdminPage() {
           )}
         </Loadable>
       )}
+      {tab === "events" && <AdminEventsList refresh={refresh} setRefresh={setRefresh} />}
       {["events", "offers", "challenges"].includes(tab) && (
         <form
           className="settings-form admin-form"
@@ -7300,8 +7397,8 @@ function InfoPage({ type }) {
       L("الخصوصية", "Privacy"),
       L("أنت تتحكم في ظهور ملفك.", "You control your profile visibility."),
       L(
-        "نحتفظ بالبيانات اللازمة للحساب والمشاركة، مثل الاسم والبريد والمنشورات والتسجيل في الفعاليات. لا يظهر ملفك في دليل الأعضاء إلا باختيارك. ربط المنتجات والرسائل البريدية والتصدير والحذف الذاتي يحتاج استكمالًا قبل الإطلاق العام. للتواصل بشأن بياناتك استخدم القنوات الرسمية على موقع USAM.",
-        "We retain account and participation data such as name, email, posts and event registrations. Your member directory visibility is opt in. Cross-product sync, email delivery, self-service export and deletion require further implementation before public launch. For data requests, use official USAM contact channels.",
+        "نحتفظ بالبيانات اللازمة للحساب والمشاركة، مثل الاسم والبريد والمنشورات والتسجيل في الفعاليات. لا يظهر ملفك في دليل الأعضاء إلا باختيارك. تُزال بيانات الموقع والجهاز من الصور قبل حفظها. يمكنك من الإعدادات تنزيل نسخة من بياناتك أو حذف حسابك؛ يُمسح ملفك وعلاقاتك فورًا وتُحذف بقية بياناتك الشخصية خلال ٣٠ يومًا، مع الاحتفاظ بسجلات الدفع للأغراض المحاسبية. للاستفسار عن بياناتك استخدم صفحة التواصل.",
+        "We retain account and participation data such as name, email, posts and event registrations. Your member directory visibility is opt in. Location and device metadata is removed from uploaded images before storage. From Settings you can download a copy of your data or delete your account: your profile and connections are removed immediately and remaining personal data within 30 days, while payment records are kept for accounting. For data questions, use the contact page.",
       ),
     ],
     terms: [

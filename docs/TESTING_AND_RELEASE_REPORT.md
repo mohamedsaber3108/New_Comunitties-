@@ -6,7 +6,7 @@ _Last updated 2026-11-04. Every number below was produced by running the command
 
 | Question | Answer |
 |---|---|
-| Does the full automated suite pass? | **Yes** - 105/105 server tests on SQLite **and** on PostgreSQL 16; 16/16 real-browser tests. |
+| Does the full automated suite pass? | **Yes** - 125/125 server tests on SQLite **and** on PostgreSQL 16; 25/25 real-browser tests; 20/20 Nginx + app container checks. |
 | Is the product **production verified**? | **No.** Nothing has been deployed to AWS or used with real credentials. |
 | Can it be deployed? | **Yes, once the external dependencies in section 7 are provided.** Deployment artifacts are written and the parts that can be tested locally were tested. |
 | Is Paymob verified end-to-end? | **No.** Our side is fully tested against a *mocked* Paymob. The real sandbox has not been called (no credentials). |
@@ -19,7 +19,7 @@ _Last updated 2026-11-04. Every number below was produced by running the command
 ```bash
 cd app
 npm ci
-npm test                       # 105 server tests, SQLite (needs nothing else)
+npm test                       # 125 server tests, SQLite (needs nothing else)
 npm run test:e2e               # 16 real-browser tests (needs Microsoft Edge/Chrome installed)
 
 # PostgreSQL (needs a Postgres 16 you can create databases on; each test file gets its own throwaway DB)
@@ -33,9 +33,9 @@ Tests are hermetic: they set or clear every environment variable they depend on,
 
 | Suite | Scope | Result | Environment |
 |---|---|---|---|
-| Server integration + unit | 105 tests, 12 files | **105 pass / 0 fail** | SQLite |
-| Same suite | 105 tests | **105 pass / 0 fail** | **PostgreSQL 16** (real server, Docker) |
-| Browser end-to-end | 16 tests | **16 pass / 0 fail** | Microsoft Edge driving the built SPA + real server |
+| Server integration + unit | 125 tests, 15 files | **125 pass / 0 fail** | SQLite |
+| Same suite | 125 tests | **125 pass / 0 fail** | **PostgreSQL 16** (real server, Docker) |
+| Browser end-to-end | 25 tests | **25 pass / 0 fail** | Microsoft Edge driving the built SPA + real server |
 | Nginx + app integration | 18 checks | **18 pass / 0 fail** | real Nginx 1.30 + the app in production mode, Linux container (`scripts/nginx-integration.sh`) |
 | Deploy script syntax | 8 scripts | all pass `bash -n` | Linux container |
 | Nginx config | `nginx -t` | successful | real Nginx |
@@ -108,7 +108,8 @@ Changes behind it: counts are now grouped queries per page (previously a comment
 - **Not browser-tested** (API-tested only): room apply/cancel/feedback UI, organization team UI, admin group/room/plan/user/payment panels (tabs render; actions are API-tested), messaging, events registration UI, mentorship UI.
 - **Preview (localStorage) mode** is preserved and builds, but is not covered by the suite.
 - **Load**: single-node only; no write-path or soak testing; no CDN.
-- **Not implemented** (documented, not faked): real-time messaging (polling), Google OAuth (schema-ready), paid events/tickets, media beyond avatars, AI assistant, tenant isolation for organizations, hard-purge of deleted accounts.
+- **Not implemented** (documented, not faked): AI assistant (blueprint marks it blocked pending provider, privacy and evaluation approval), tenant isolation for organizations, file types other than images, WebAuthn. Google sign-in, Paymob event tickets, SES and S3 are implemented but verified only against in-process stubs, never against the live services.
+- **Database upgrade path:** a database created by the previous release (f7bc609, migrations 0001-0003) was upgraded in place with 0004-0005 on PostgreSQL 16; the new app booted on it and served events and posts; 0005 and 0004 rolled back and re-applied cleanly.
 
 ## 6. Release gate checklist
 | Gate | State |

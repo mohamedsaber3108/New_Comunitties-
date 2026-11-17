@@ -51,7 +51,7 @@ New pages and components only, plus fixes to defects found by browser testing:
 - The localStorage preview build still builds and runs; server-only cards are hidden there.
 
 ## 5. Not done (explicit)
-Real-time messaging; Google OAuth; WebAuthn/QR for MFA; paid events; uploads beyond avatars; organization tenancy/analytics; AI assistant; hard-purge of deleted accounts; cursor pagination; Sentry SDK wiring (alarms via CloudWatch instead); WCAG audit; non-Edge browser coverage; browser tests for room/team/admin-panel UI; write-path load tests.
+AI assistant (blocked by the blueprint pending provider/privacy approval); WebAuthn and QR codes for MFA; multi-instance realtime; organization tenant isolation; non-image uploads; Sentry SDK wiring (alarms via CloudWatch instead); WCAG audit; non-Edge browser coverage; write-path load tests.
 
 ## 6. Blockers - need the owner
 | # | Needs | Unblocks |
@@ -77,6 +77,7 @@ Real-time messaging; Google OAuth; WebAuthn/QR for MFA; paid events; uploads bey
 | 2026-11-04 | backup -> restore | identical counts + checksum |
 | 2026-11-04 | production boot + SIGTERM | clean (12 ms shutdown) |
 | 2026-11-10 | manual activation restricted to super_admin when Paymob is live | `payments.test.js` 13/13 |
+| 2026-11-17 | realtime, paid tickets, post images, Google sign-in, org analytics, deletion purge, event cancel + refunds (migrations 0004-0005) | 125/125 SQLite + 125/125 PostgreSQL; 25/25 Edge E2E; 20/20 Nginx container checks; old-release DB upgraded in place |
 | 2026-11-10 | TOTP two-factor (migration 0003) | `mfa.test.js` 8/8 (RFC 6238 vectors); migration add/down/re-add verified on PostgreSQL; full suite 105/105 SQLite + 105/105 PostgreSQL; Edge E2E 16/16 |
 
 ## 8. Housekeeping notes

@@ -369,3 +369,42 @@ test("paid event tickets: seat hold, capacity, webhook confirmation, refund rele
   // Resuming an expired hold's checkout is refused.
   assert.equal((await req(`/payments/checkout/${second.body.paymentAttemptId}`, "POST", undefined, rival)).status, 409);
 });
+test("cancelling a paid event refunds every ticket through the provider and notifies registrants", async () => {
+  const { Registration, Notification } = await import("./db.js");
+  const startsAt = new Date(Date.now() + 9 * 86400_000).toISOString();
+  const ev = await req("/admin/events", "POST", { title: "Cancelled Gala", startsAt, capacity: 5, community: "launchpad", priceType: "paid", priceEgp: 120 }, adminCookie);
+  const buyers = [await signup("gala-a@example.test"), await signup("gala-b@example.test")];
+  const attempts = [];
+  for (const c of buyers) {
+    const h = await req(`/events/${ev.body.id}/register`, "POST", undefined, c);
+    const w = signedWebhook(txnFor(h.body.paymentAttemptId, 120));
+    await req(w.path, "POST", w.body);
+    attempts.push(h.body.paymentAttemptId);
+  }
+  const holder = await signup("gala-c@example.test");
+  await req(`/events/${ev.body.id}/register`, "POST", undefined, holder); // unpaid hold
+  const before = (await req("/admin/events", "GET", null, adminCookie)).body.items.find((x) => x.id === ev.body.id);
+  assert.equal(before.registeredCount, 2);
+  assert.equal(before.netRevenueEgp, 240);
+  assert.equal((await req(`/admin/events/${ev.body.id}`, "PATCH", { status: "cancelled" }, memberCookie)).status, 403);
+  // Capacity can never drop below confirmed seats.
+  assert.equal((await req(`/admin/events/${ev.body.id}`, "PATCH", { capacity: 1 }, adminCookie)).status, 400);
+  const refundsBefore = paymobCalls.filter((c) => c.url.endsWith("/void_refund/refund")).length;
+  const r = await req(`/admin/events/${ev.body.id}`, "PATCH", { status: "cancelled" }, adminCookie);
+  assert.equal(r.status, 200);
+  assert.equal(r.body.refunds.length, 2);
+  assert.ok(r.body.refunds.every((x) => x.ok));
+  assert.equal(paymobCalls.filter((c) => c.url.endsWith("/void_refund/refund")).length, refundsBefore + 2);
+  for (const id of attempts) assert.equal((await PaymentAttempt.findByPk(id)).status, "refunded");
+  assert.equal(await Registration.count({ where: { EventId: ev.body.id, status: { [(await import("sequelize")).Op.ne]: "cancelled" } } }), 0);
+  const after = (await req("/admin/events", "GET", null, adminCookie)).body.items.find((x) => x.id === ev.body.id);
+  assert.equal(after.netRevenueEgp, 0);
+  assert.equal(after.status, "cancelled");
+  // Registrants are told; the page still explains the cancellation.
+  const u = await User.findOne({ where: { email: "gala-a@example.test" } });
+  assert.ok(await Notification.findOne({ where: { UserId: u.id, kind: "event_cancelled" } }));
+  const page = await req(`/events/${ev.body.id}`, "GET", undefined, buyers[0]);
+  assert.equal(page.body.item.status, "cancelled");
+  assert.equal((await req(`/events/${ev.body.id}/register`, "POST", undefined, holder)).status, 404, "no new registrations");
+  assert.equal((await req(`/admin/events/${ev.body.id}`, "PATCH", { status: "published" }, adminCookie)).status, 409, "a cancelled event stays cancelled");
+});

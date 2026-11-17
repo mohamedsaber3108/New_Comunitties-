@@ -66,6 +66,16 @@ LAST_IP="$(grep '"path":"/api/v1/plans"' /tmp/app.log | tail -1 | sed -n 's/.*"i
 # The app must see the real peer (127.0.0.1 / ::1 in this container), NOT the spoofed value.
 case "$LAST_IP" in 6.6.6.6) check "spoofed X-Forwarded-For ignored" "not 6.6.6.6" "6.6.6.6";; *) check "spoofed X-Forwarded-For ignored" "ok" "ok";; esac
 
+echo "--- image upload location + realtime stream ---"
+IM="$(S -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' --data-binary @/tmp/big5m.txt https://$H/api/v1/media/images)"
+[ "$IM" != "413" ] && check "5MB to post-image path is NOT blocked by nginx (app answered $IM)" "ok" "ok" || check "5MB to post-image path is NOT blocked by nginx" "not 413" "413"
+CK="$(S -D - -o /dev/null -X POST -H 'Content-Type: application/json' -H "Origin: https://$H" \
+  -d '{"name":"Stream Tester","email":"sse@example.test","password":"abcdef1234","persona":"launchpad"}' \
+  https://$H/api/v1/auth/signup | grep -i '^set-cookie: usam_session' | sed 's/^[Ss]et-[Cc]ookie: \([^;]*\).*/\1/')"
+# SSE must reach the browser immediately (Nginx must not buffer it): the
+# "ready" event has to arrive well inside the 3 s window.
+FIRST="$(S -N --max-time 3 -H "Cookie: $CK" https://$H/api/v1/stream 2>/dev/null | head -c 300)"
+case "$FIRST" in *"event: ready"*) check "SSE stream delivered unbuffered through nginx" "ok" "ok";; *) check "SSE stream delivered unbuffered through nginx" "event: ready" "${FIRST:-nothing}";; esac
 echo "--- nginx rate limiting on credential endpoints ---"
 CODES=""
 for i in $(seq 1 40); do

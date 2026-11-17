@@ -1575,8 +1575,10 @@ app.get("/api/v1/events/:id", async (req, res, next) => {
     // Registration row (other members' ids and their ticket codes, which are
     // the check-in credential). Now: aggregate counts + only the viewer's own
     // registration.
+    // Cancelled events stay reachable so registrants' links still explain
+    // what happened (registration itself requires "published").
     const e = await Event.findOne({
-      where: { id: req.params.id, status: "published" },
+      where: { id: req.params.id, status: { [Op.in]: ["published", "cancelled"] } },
       include: [Community],
     });
     if (!e) return fail(res, 404, "not_found");
@@ -3641,6 +3643,104 @@ app.put(
     }
   },
 );
+// Admin event list: every status, with seat counts and paid-ticket revenue.
+app.get("/api/v1/admin/events", auth, admin, async (req, res, next) => {
+  try {
+    const events = await Event.findAll({
+      include: [{ model: Community, attributes: ["slug", "nameEn", "nameAr"] }],
+      order: [["startsAt", "DESC"]],
+      limit: 200,
+    });
+    const views = await eventViews(events, null);
+    const ids = events.map((e) => e.id);
+    const paid = ids.length
+      ? await PaymentAttempt.findAll({
+          where: { status: { [Op.in]: ["paid", "refunded"] }, RegistrationId: { [Op.ne]: null } },
+          include: [{ model: Registration, attributes: ["EventId"], where: { EventId: { [Op.in]: ids } } }],
+          attributes: ["amountEgp", "refundedAmountEgp", "status"],
+        })
+      : [];
+    const revenue = new Map();
+    for (const p of paid) {
+      const k = p.Registration.EventId;
+      revenue.set(k, (revenue.get(k) || 0) + p.amountEgp - (p.refundedAmountEgp || 0));
+    }
+    res.json({
+      items: views.map((v) => ({ ...v, netRevenueEgp: revenue.get(v.id) || 0 })),
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+// Edit or cancel an event. Cancelling notifies every registrant; for a paid
+// event each ticket is refunded through the payment provider (results are
+// returned per ticket so a failed refund is visible, never silent).
+app.patch("/api/v1/admin/events/:id", auth, admin, async (req, res, next) => {
+  try {
+    const e = await Event.findByPk(req.params.id);
+    if (!e) return fail(res, 404, "not_found");
+    const updates = {};
+    if (req.body.title !== undefined) {
+      const title = clean(req.body.title, 160);
+      if (title.length < 3) return fail(res, 400, "invalid_event");
+      updates.title = title;
+    }
+    if (req.body.description !== undefined) updates.description = clean(req.body.description, 3000);
+    if (req.body.venue !== undefined) updates.venue = clean(req.body.venue, 200);
+    if (req.body.startsAt !== undefined) {
+      const d = new Date(req.body.startsAt);
+      if (isNaN(d)) return fail(res, 400, "invalid_event");
+      updates.startsAt = d;
+    }
+    if (req.body.capacity !== undefined) {
+      const capacity = Number(req.body.capacity);
+      const registered = await Registration.count({ where: { EventId: e.id, status: "registered" } });
+      if (!Number.isInteger(capacity) || capacity < Math.max(1, registered) || capacity > 100000)
+        return fail(res, 400, "capacity_below_registrations");
+      updates.capacity = capacity;
+    }
+    const status = req.body.status;
+    if (status !== undefined && !["published", "cancelled", "draft"].includes(status))
+      return fail(res, 400, "invalid_status");
+    if (e.status === "cancelled" && status && status !== "cancelled")
+      return fail(res, 409, "event_cancelled");
+    if (status) updates.status = status;
+    await e.update(updates);
+    const refunds = [];
+    if (status === "cancelled") {
+      const regs = await Registration.findAll({
+        where: { EventId: e.id, status: { [Op.in]: ["registered", "waitlisted", "pending_payment"] } },
+      });
+      for (const r of regs) {
+        await notify(r.UserId, "event_cancelled", `${e.title} was cancelled`, `/events/${e.id}`);
+      }
+      if (e.priceType === "paid") {
+        const attempts = await PaymentAttempt.findAll({
+          where: { RegistrationId: { [Op.in]: regs.map((r) => r.id) }, status: "paid" },
+        });
+        for (const a of attempts) {
+          const out = await routeDeps.issueRefund(a, a.amountEgp - (a.refundedAmountEgp || 0), req);
+          refunds.push({ paymentAttemptId: a.id, ok: out.ok, error: out.error || null });
+        }
+        await PaymentAttempt.update(
+          { status: "canceled" },
+          { where: { RegistrationId: { [Op.in]: regs.map((r) => r.id) }, status: { [Op.in]: ["created", "pending"] } } },
+        );
+      }
+      // Refunded tickets were already cancelled by issueRefund; release the rest.
+      await Registration.update(
+        { status: "cancelled" },
+        { where: { EventId: e.id, status: { [Op.in]: ["waitlisted", "pending_payment"] } } },
+      );
+      if (e.priceType !== "paid")
+        await Registration.update({ status: "cancelled" }, { where: { EventId: e.id, status: "registered" } });
+    }
+    await audit(req, status === "cancelled" ? "cancel_event" : "update_event", "event", e.id, JSON.stringify(Object.keys(updates)));
+    res.json({ ok: true, status: e.status, refunds });
+  } catch (err) {
+    next(err);
+  }
+});
 app.post(
   "/api/v1/admin/events/check-in",
   auth,

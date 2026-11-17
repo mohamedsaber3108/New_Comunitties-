@@ -392,85 +392,98 @@ export function registerPaymentRoutes(app, deps) {
         const amount = Number(req.body.amountEgp) || attempt.amountEgp;
         if (amount <= 0 || amount > attempt.amountEgp - attempt.refundedAmountEgp)
           return fail(res, 400, "invalid_refund_amount");
-
-        // Call the real Paymob refund API when configured. If it fails, the
-        // whole request fails — we never record a refund we did not actually
-        // issue with the provider. If Paymob is not configured there was
-        // never a real charge to refund, so proceed with the local-only
-        // bookkeeping path (keeps the sandbox/manual-activation flow usable).
-        let providerResult = null;
-        if (paymob.isConfigured() && attempt.providerTransactionId) {
-          try {
-            providerResult = await paymob.refundTransaction({
-              transactionId: attempt.providerTransactionId,
-              amountEgp: amount,
-            });
-            if (providerResult?.success === false) {
-              return fail(res, 502, "provider_refund_rejected");
-            }
-          } catch (err) {
-            logger.error("payments.refund_failed", { error: String(err), attemptId: attempt.id });
-            return fail(res, 502, "provider_refund_failed");
-          }
-        }
-
-        const refundIds = JSON.parse(attempt.refundTransactionIds || "[]");
-        if (providerResult?.id) refundIds.push(String(providerResult.id));
-        const refundedTotal = attempt.refundedAmountEgp + amount;
-        const fullyRefunded = refundedTotal >= attempt.amountEgp;
-        await sequelize.transaction(async (t) => {
-          await attempt.update(
-            {
-              refundedAmountEgp: refundedTotal,
-              status: fullyRefunded ? "refunded" : "paid",
-              refundedAt: new Date(),
-              refundTransactionIds: JSON.stringify(refundIds),
-            },
-            { transaction: t },
-          );
-          // Only a FULL refund revokes membership; a partial refund (e.g. a
-          // goodwill credit) leaves the subscription active.
-          if (fullyRefunded && attempt.SubscriptionId) {
-            await Subscription.update(
-              { status: "canceled", canceledAt: new Date() },
-              { where: { id: attempt.SubscriptionId }, transaction: t },
-            );
-          }
-          // A fully refunded event ticket releases the seat.
-          if (fullyRefunded && attempt.RegistrationId) {
-            await Registration.update(
-              { status: "cancelled" },
-              { where: { id: attempt.RegistrationId }, transaction: t },
-            );
-          }
-        });
-        try {
-          const member = await User.findByPk(attempt.UserId);
-          if (member)
-            await enqueueEmail(member.email, "refundIssued", {
-              name: member.name,
-              amountEgp: amount,
-            });
-        } catch (mailErr) {
-          logger.warn("payments.refund_email_failed", { error: String(mailErr) });
-        }
-        await audit(
-          req,
-          "refund_payment",
-          "payment_attempt",
-          attempt.id,
-          `${amount}${providerResult ? ":provider_confirmed" : ":local_only"}`,
-        );
+        const out = await issueRefund(attempt, amount, req);
+        if (!out.ok) return fail(res, 502, out.error);
         res.json({
           ok: true,
-          refundedAmountEgp: attempt.refundedAmountEgp + amount,
-          providerConfirmed: !!providerResult,
+          refundedAmountEgp: out.refundedAmountEgp,
+          providerConfirmed: out.providerConfirmed,
         });
       } catch (e) {
         next(e);
       }
     },
   );
+
+  // Refund `amount` EGP of a paid attempt: provider first (when live), then
+  // local bookkeeping in one transaction, then the member email + audit.
+  // Shared by the admin refund route and event cancellation.
+  async function issueRefund(attempt, amount, req) {
+    // Call the real Paymob refund API when configured. If it fails, the
+    // whole request fails — we never record a refund we did not actually
+    // issue with the provider. If Paymob is not configured there was
+    // never a real charge to refund, so proceed with the local-only
+    // bookkeeping path (keeps the sandbox/manual-activation flow usable).
+    let providerResult = null;
+    if (paymob.isConfigured() && attempt.providerTransactionId) {
+      try {
+        providerResult = await paymob.refundTransaction({
+          transactionId: attempt.providerTransactionId,
+          amountEgp: amount,
+        });
+        if (providerResult?.success === false) {
+          return { ok: false, error: "provider_refund_rejected" };
+        }
+      } catch (err) {
+        logger.error("payments.refund_failed", { error: String(err), attemptId: attempt.id });
+        return { ok: false, error: "provider_refund_failed" };
+      }
+    }
+
+    const refundIds = JSON.parse(attempt.refundTransactionIds || "[]");
+    if (providerResult?.id) refundIds.push(String(providerResult.id));
+    const refundedTotal = attempt.refundedAmountEgp + amount;
+    const fullyRefunded = refundedTotal >= attempt.amountEgp;
+    await sequelize.transaction(async (t) => {
+      await attempt.update(
+        {
+          refundedAmountEgp: refundedTotal,
+          status: fullyRefunded ? "refunded" : "paid",
+          refundedAt: new Date(),
+          refundTransactionIds: JSON.stringify(refundIds),
+        },
+        { transaction: t },
+      );
+      // Only a FULL refund revokes membership; a partial refund (e.g. a
+      // goodwill credit) leaves the subscription active.
+      if (fullyRefunded && attempt.SubscriptionId) {
+        await Subscription.update(
+          { status: "canceled", canceledAt: new Date() },
+          { where: { id: attempt.SubscriptionId }, transaction: t },
+        );
+      }
+      // A fully refunded event ticket releases the seat.
+      if (fullyRefunded && attempt.RegistrationId) {
+        await Registration.update(
+          { status: "cancelled" },
+          { where: { id: attempt.RegistrationId }, transaction: t },
+        );
+      }
+    });
+    try {
+      const member = await User.findByPk(attempt.UserId);
+      if (member)
+        await enqueueEmail(member.email, "refundIssued", {
+          name: member.name,
+          amountEgp: amount,
+        });
+    } catch (mailErr) {
+      logger.warn("payments.refund_email_failed", { error: String(mailErr) });
+    }
+    await audit(
+      req,
+      "refund_payment",
+      "payment_attempt",
+      attempt.id,
+      `${amount}${providerResult ? ":provider_confirmed" : ":local_only"}`,
+    );
+    return {
+      ok: true,
+      refundedAmountEgp: refundedTotal,
+      providerConfirmed: !!providerResult,
+    };
+  }
+  deps.issueRefund = issueRefund;
 
   // Reconciliation: re-check a pending attempt directly with Paymob. Covers
   // a webhook that never arrived (network blip, Paymob retry exhaustion).

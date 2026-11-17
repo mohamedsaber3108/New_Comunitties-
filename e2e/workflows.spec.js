@@ -168,12 +168,12 @@ test("events: admin publishes free + paid events; registration, waitlist, ticket
   await form.getByLabel("Starts at").fill(local);
   await form.getByLabel("Capacity").fill("1");
   await form.getByRole("button", { name: "Publish" }).click();
-  await expect(admin.page.getByText("Published")).toBeVisible();
+  await expect(admin.page.locator(".toast", { hasText: "Published" })).toBeVisible();
   await form.getByLabel("Title").fill(paid);
   await form.getByLabel("Registration type").selectOption("paid");
   await form.getByLabel("Ticket price (EGP)").fill("350");
   await form.getByRole("button", { name: "Publish" }).click();
-  await expect(admin.page.getByText("Published").last()).toBeVisible();
+  await expect(admin.page.locator(".admin-row", { hasText: paid })).toBeVisible();
   const [ev] = await dbAll("SELECT startsAt, priceType, priceEgp FROM Events WHERE title = ?", [paid]);
   expect(ev).toMatchObject({ priceType: "paid", priceEgp: 350 });
   // The admin's local time was converted to the same instant on the server.
