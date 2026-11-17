@@ -1,0 +1,1 @@
+module.exports={apps:[{name:'usam-communities',script:'server/index.js',cwd:'/opt/usam-communities',instances:1,exec_mode:'fork',max_memory_restart:'400M',env:{NODE_ENV:'production',PORT:'3001',DB_DIALECT:'mysql',REGISTRATION_ENABLED:'false'}}]};

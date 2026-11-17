@@ -1,0 +1,12 @@
+# EC2 release preparation — no deployment performed
+
+Target according to supplied brief: separate Hub EC2 `13.48.137.19`, with a private RDS MySQL database and Nginx. Do not touch E-USAM Education `13.49.49.246`. `hub.usamif.com` DNS/TLS cutover needs separate approval. This runbook is for a **new, isolated environment**, not an in-place replacement of the existing Hub.
+
+1. Inventory the target EC2, repo, process manager, Nginx and database backups. Confirm there is no existing Hub data/schema conflict. Acquire an approved backup and tested restore plan. Verify the RDS private security group, TLS CA, instance IAM role, cost, and access restrictions.
+2. On a new empty RDS database, install Node 24. Transfer the reviewed source. Run `npm ci` and `npm run check`. Set environment variables securely: `NODE_ENV=production`, `PORT=3001`, `APP_ORIGIN=https://<approved-hostname>`, `DB_DIALECT=mysql`, `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_SSL_CA`, and `REGISTRATION_ENABLED=false`. Never commit secrets or static AWS access keys.
+3. Explicitly bootstrap **only that new empty DB** with `CONFIRM_EMPTY_DB=yes npm run db:bootstrap`. Provision an admin with `ADMIN_EMAIL`, `ADMIN_NAME`, `ADMIN_PASSWORD` and `node server/create-admin.js`; clear the password environment variable immediately. There is no automatic production schema sync.
+4. Build `dist/`; start one process with the supplied PM2 configuration (or approved equivalent) and a secure environment provider. Configure the included Nginx locations inside an approved HTTPS server block. Keep port 3001 bound/private behind Nginx and restrict DB to private networking.
+5. Verify `/api/v1/health`, signup gate, login, community listing, CRUD journey, unauthorized admin rejection, logs, cookies, content security headers, backup restore, and mobile browser flows on an authenticated pre-domain preview. The provided tests do not replace this step.
+6. Before opening registration or changing DNS: complete email verification/recovery, legal review, production MySQL tests, security and browser QA, monitoring and alerts, backups, and a safe migration/cutover strategy that preserves writes after cutover.
+
+Rollback: keep previous source artifact and Nginx config; reverse app traffic only after determining how to preserve writes created after cutover. Do not rely on DNS rollback alone. Schema rollback is not implemented in this package, so do not migrate an existing production database using this bootstrap.

@@ -1,0 +1,52 @@
+# /etc/systemd/system/usam-communities.service
+[Unit]
+Description=USAM Communities (Node.js API + SPA)
+Documentation=file:///opt/usam-communities/current/PRODUCTION_DEPLOYMENT_GUIDE.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=usam
+Group=usam
+WorkingDirectory=/opt/usam-communities/current
+# Secrets live OUTSIDE the release directory, root-owned, group-readable only.
+EnvironmentFile=/etc/usam-communities/env
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node server/index.js
+# Never let a crash loop hammer RDS: wait, retry, and cap the burst.
+Restart=always
+RestartSec=3
+StartLimitIntervalSec=120
+StartLimitBurst=10
+# SIGTERM -> the app drains requests and closes the DB pool (25s internal cap).
+KillSignal=SIGTERM
+TimeoutStopSec=35
+# Logs go to journald (JSON lines); the CloudWatch agent ships them.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=usam-communities
+
+# ---- Sandboxing (the app only needs to read its code and talk to the network)
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+# Only needed when STORAGE_DRIVER=local (not used with S3). Harmless otherwise.
+ReadWritePaths=/var/lib/usam-communities
+MemoryMax=900M
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

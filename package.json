@@ -1,0 +1,52 @@
+{
+  "name": "usam-communities",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite preview --host 0.0.0.0",
+    "dev:full": "npm run build:ec2 && node server/index.js",
+    "dev:ui": "vite --host 127.0.0.1",
+    "dev:api": "node --watch server/index.js",
+    "build": "vite build --mode preview",
+    "build:ec2": "vite build",
+    "start": "node server/index.js",
+    "test": "node --test server/*.test.js",
+    "docs:api": "node scripts/gen-api-docs.mjs",
+    "test:e2e": "playwright test",
+    "test:all": "npm test && npm run test:e2e",
+    "check": "npm run build && npm test",
+    "db:bootstrap": "node server/bootstrap.js",
+    "db:migrate": "node server/migrate.js up",
+    "db:migrate:status": "node server/migrate.js status",
+    "db:migrate:down": "node server/migrate.js down",
+    "create:admin": "node server/create-admin.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "cookie-parser": "^1.4.7",
+    "express": "^5.2.1",
+    "lucide-react": "^0.468.0",
+    "mysql2": "^3.15.3",
+    "pg": "8.23.1",
+    "pg-hstore": "2.3.4",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "react-router-dom": "^7.9.0",
+    "sequelize": "^6.37.7"
+  },
+  "optionalDependencies": {
+    "@aws-sdk/client-s3": "3.1161.0",
+    "@aws-sdk/client-ses": "3.1161.0",
+    "nodemailer": "10.3.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.56.1",
+    "sqlite3": "^5.1.7",
+    "vite": "^7.1.0"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true,
+    "sqlite3@5.1.7": true
+  }
+}

@@ -1,0 +1,9 @@
+# Security and privacy
+
+Implemented: bcrypt password hashing, random opaque server-side sessions with SHA-256 token hashes in storage, httpOnly/SameSite cookies, Secure in production, same-origin mutation guard, minimal response fields, opt-in member directory and direct messages with shared-community checks, blocks, server-side ownership and role checks, constrained body lengths, basic login/signup rate limiting, report queue, admin audit entries, and text escaped by React. No seeded admin credentials are shipped. `server/create-admin.js` requires an environment-provided 16+ character password and explicit opt-in for promotion.
+
+Public contact requests have field validation, a hidden honeypot and basic in-memory per-IP throttling; requests are available only in the admin queue. The server trusts forwarded IPs only from a loopback proxy. This is a first layer, not a distributed abuse control. Static hosted mode handles the form locally and keeps only a reference and topic in the browser; it does not transmit a request to an operator.
+
+Open before public launch: email verification and reset, durable distributed throttling, MFA/session device UI, stronger CSRF tokens for every configuration, content upload validation, richer moderation and appeals, account export/deletion workflow, privacy counsel approved legal copy, dependency remediation, per-user abuse controls, intrusion monitoring, backup/restore tests, and scoped tenancy/organization permissions. In-memory auth throttling resets on process restart. SQL search is a bounded `LIKE` query, not a production search index.
+
+`npm audit --omit=dev` on 26 Oct 2026: two moderate advisories, Sequelize and transitive uuid; no high/critical in the production dependency set. The SQLite native driver is development-only; the full development dependency tree has additional advisories. Do not use a forced audit upgrade without compatibility testing.

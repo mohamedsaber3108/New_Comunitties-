@@ -1,0 +1,56 @@
+name: Check
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: usam
+          POSTGRES_PASSWORD: ci_only
+          POSTGRES_DB: usam_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U usam" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - name: Production build (real API) and preview build
+        run: npm run build:ec2 && npm run build
+      - name: API documentation matches the live router
+        run: node scripts/gen-api-docs.mjs /tmp/api.md
+      - name: Server tests (SQLite)
+        run: npm test
+      - name: Server tests (PostgreSQL)
+        run: node --test server/*.test.js
+        env:
+          TEST_DB_DIALECT: postgres
+          TEST_PG_ADMIN_URL: postgres://usam:ci_only@127.0.0.1:5432/postgres
+      - name: Shell script syntax
+        run: for f in deploy/*.sh scripts/*.sh; do bash -n "$f"; done
+      - name: Dependency advisories (production deps, high+)
+        run: npm audit --omit=dev --audit-level=high
+  e2e:
+    runs-on: ubuntu-latest
+    needs: verify
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run build:ec2
+      - run: npm run test:e2e
+        env:
+          PLAYWRIGHT_CHANNEL: chromium
