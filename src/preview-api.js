@@ -196,6 +196,19 @@ function safePost(post, user) {
     own: post.author.id === user?.id,
   };
 }
+// Same public shape as the real API: counts + only the viewer's registration.
+function previewEventView(event, state) {
+  const regs = state.registrations.filter((r) => r.EventId === event.id);
+  const registered = regs.filter((r) => r.status === "registered").length;
+  const own = regs.find((r) => r.UserId === state.user?.id && r.status !== "cancelled");
+  return {
+    ...event,
+    registeredCount: registered,
+    waitlistCount: regs.filter((r) => r.status === "waitlisted").length,
+    seatsLeft: Math.max(0, event.capacity - registered),
+    myRegistration: own ? { status: own.status, checkedIn: !!own.checkedInAt } : null,
+  };
+}
 export default async function previewApi(endpoint, options = {}) {
   const state = read(),
     method = (options.method || "GET").toUpperCase(),
@@ -792,7 +805,8 @@ export default async function previewApi(endpoint, options = {}) {
       ),
     };
   }
-  if (path === "/events") return { items: seedEvents };
+  if (path === "/events")
+    return { items: seedEvents.map((e) => previewEventView(e, state)) };
   const eventMatch = path.match(/^\/events\/([^/]+)(?:\/(register|ticket))?$/);
   if (eventMatch) {
     const event = seedEvents.find((e) => e.id === eventMatch[1]);
@@ -846,14 +860,7 @@ export default async function previewApi(endpoint, options = {}) {
       save(state);
       return { status: registration.status };
     }
-    return {
-      item: {
-        ...event,
-        Registrations: state.registrations.filter(
-          (r) => r.EventId === event.id,
-        ),
-      },
-    };
+    return { item: previewEventView(event, state) };
   }
   if (path === "/offers") return { items: seedOffers };
   const offerMatch = path.match(/^\/offers\/([^/]+)\/claim$/);

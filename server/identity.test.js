@@ -214,7 +214,7 @@ test("account deletion soft-deletes and blocks further login", async () => {
     password: "another12345",
   });
   const cookie = login.cookie;
-  const del = await req("/users/me", "DELETE", { confirm: "DELETE" }, cookie);
+  const del = await req("/users/me", "DELETE", { confirm: "DELETE", password: "another12345" }, cookie);
   assert.equal(del.status, 200);
   const u = await User.findByPk(
     (await User.findAll({ where: { isDeleted: true } }))[0].id,
@@ -238,4 +238,24 @@ test("payments config reports Paymob as not configured in tests", async () => {
   const r = await req("/payments/config");
   assert.equal(r.status, 200);
   assert.equal(r.body.configured, false);
+});
+
+test("deleted accounts are purged after the grace window (credentials destroyed, personal rows removed)", async () => {
+  const { Notification, Session, VerificationToken, OutboxMessage, WebhookEvent, MediaAsset } = await import("./db.js");
+  const { runHousekeeping, PURGE_AFTER_DAYS } = await import("./housekeeping.js");
+  const gone = (await User.findAll({ where: { isDeleted: true } }))[0];
+  await Notification.create({ UserId: gone.id, kind: "x", text: "private", href: "/" });
+  const deps = { Session, VerificationToken, OutboxMessage, WebhookEvent, Notification, MediaAsset, User, models: sequelize.models };
+  // Inside the grace window nothing is purged yet.
+  let stats = await runHousekeeping(deps);
+  assert.equal(stats.purgedAccounts, 0);
+  await gone.update({ deletedAt: new Date(Date.now() - (PURGE_AFTER_DAYS + 1) * 86400_000) });
+  stats = await runHousekeeping(deps);
+  assert.equal(stats.purgedAccounts, 1);
+  const after = await User.findByPk(gone.id);
+  assert.ok(after.purgedAt);
+  assert.match(after.passwordHash, /^!purged:/);
+  assert.match(after.username, /^deleted-/);
+  assert.equal(await Notification.count({ where: { UserId: gone.id } }), 0);
+  assert.equal((await runHousekeeping(deps)).purgedAccounts, 0, "purge runs once");
 });

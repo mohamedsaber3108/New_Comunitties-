@@ -165,6 +165,21 @@ export const templates = {
       text: `Your ${planName} membership is active.`,
     };
   },
+  eventTicket({ name, eventTitle, startsAt, eventId, ticketCode }) {
+    const html = layout(
+      `<p>Hi ${esc(name)},</p>
+       <p>Your payment is confirmed. You have a seat at <strong>${esc(eventTitle)}</strong>${
+         startsAt ? ` on ${esc(new Date(startsAt).toUTCString())}` : ""
+       }.</p>
+       <p>Ticket code: <strong style="letter-spacing:2px">${esc(ticketCode)}</strong></p>
+       <p style="margin:24px 0">${button(config.frontendUrl + "/events/" + encodeURIComponent(eventId), "View event")}</p>`,
+    );
+    return {
+      subject: `Your ticket: ${String(eventTitle).slice(0, 80)}`,
+      html,
+      text: `Your seat at ${eventTitle} is confirmed. Ticket code: ${ticketCode}`,
+    };
+  },
   paymentFailed({ name, planName }) {
     const html = layout(
       `<p>Hi ${esc(name)},</p>

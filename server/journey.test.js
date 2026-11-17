@@ -182,8 +182,11 @@ test("JOURNEY: a new member goes from sign-up to a paid, entitled, then departed
   assert.equal(exp.body.email, "journey@example.test");
   assert.ok(exp.body.payments.length >= 1);
   assert.equal(exp.body.profile.passwordHash, undefined, "no secrets in the export");
-  assert.equal((await req("/users/me", "DELETE", { confirm: "nope" }, jar.me)).status, 400);
-  assert.equal((await req("/users/me", "DELETE", { confirm: "DELETE" }, jar.me)).status, 200);
+  assert.equal((await req("/users/me", "DELETE", { confirm: "nope", password: "abcdef1234" }, jar.me)).status, 400);
+  // A session alone cannot erase the account: the password is re-checked.
+  assert.equal((await req("/users/me", "DELETE", { confirm: "DELETE" }, jar.me)).status, 401);
+  assert.equal((await req("/users/me", "DELETE", { confirm: "DELETE", password: "wrong-pass-1" }, jar.me)).status, 401);
+  assert.equal((await req("/users/me", "DELETE", { confirm: "DELETE", password: "abcdef1234" }, jar.me)).status, 200);
   assert.equal((await req("/me", "GET", null, jar.me)).body.user, null, "session is dead after deletion");
   assert.equal((await req("/auth/login", "POST", { email: "journey@example.test", password: "abcdef1234" })).status, 401);
   // Deleted member vanishes from the directory.

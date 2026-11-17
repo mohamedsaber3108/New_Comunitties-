@@ -135,7 +135,9 @@ test("organization teams: owner adds/removes members, others cannot, no emails l
   assert.ok(member);
   assert.equal(member.User.email, undefined, "team listing must not leak member emails");
 
-  assert.equal((await req(`/organizations/${orgId}/team/${member.id}`, "PATCH", null, who.bob)).status, 403);
+  // An outsider cannot remove a team member (the member may leave by themselves).
+  const outsider = await signup("outsider");
+  assert.equal((await req(`/organizations/${orgId}/team/${member.id}`, "PATCH", null, outsider)).status, 403);
   assert.equal((await req(`/organizations/${orgId}/team/${member.id}`, "PATCH", null, who.alice)).status, 200);
   const after_ = (await req("/organizations/mine", "GET", null, who.alice)).body.items.find((o) => o.id === orgId);
   assert.equal(after_.OrganizationMembers.find((m) => m.id === member.id).status, "removed");
@@ -217,4 +219,49 @@ test("housekeeping removes expired sessions/tokens but keeps live ones", async (
   assert.ok(stats.sessions >= 1);
   assert.ok(stats.tokens >= 1);
   assert.equal(await Session.count({ where: { UserId: who.alice.id } }), liveSessions);
+});
+
+test("organization team admins, role changes, leaving, member view and analytics", async () => {
+  const dan = await signup("dan");
+  const erin = await signup("erin");
+  const org = await req("/organizations", "POST", { name: "Analytics Org", description: "Team analytics test org.", sector: "Tech" }, who.alice);
+  const orgId = org.body.id || org.body.item?.id;
+  await req(`/admin/organizations/${orgId}`, "PATCH", { status: "approved" }, who.admin);
+  // Owner adds Dan as a member, then promotes him to team admin.
+  await req(`/organizations/${orgId}/team`, "POST", { username: dan.username, role: "member" }, who.alice);
+  let team = (await req("/organizations/mine", "GET", null, who.alice)).body.items.find((o) => o.id === orgId);
+  const danRow = team.OrganizationMembers.find((m) => m.UserId === dan.id);
+  assert.equal(team.myRole, "owner");
+  assert.equal((await req(`/organizations/${orgId}/team/${danRow.id}`, "PATCH", { role: "admin" }, dan)).status, 403, "members cannot promote themselves");
+  assert.equal((await req(`/organizations/${orgId}/team/${danRow.id}`, "PATCH", { role: "boss" }, who.alice)).status, 400);
+  assert.equal((await req(`/organizations/${orgId}/team/${danRow.id}`, "PATCH", { role: "admin" }, who.alice)).status, 200);
+  // A team admin can add members but cannot mint other admins.
+  assert.equal((await req(`/organizations/${orgId}/team`, "POST", { username: erin.username, role: "admin" }, dan)).status, 403);
+  assert.equal((await req(`/organizations/${orgId}/team`, "POST", { username: erin.username, role: "member" }, dan)).status, 201);
+  // Erin sees the org as a member, with a restricted team list.
+  const erinView = (await req("/organizations/mine", "GET", null, erin)).body.items.find((o) => o.id === orgId);
+  assert.equal(erinView.myRole, "member");
+  assert.ok(erinView.OrganizationMembers.every((m) => m.status === "active" && m.User.email === undefined));
+  // Analytics: managers only.
+  assert.equal((await req(`/organizations/${orgId}/analytics`, "GET", null, erin)).status, 403);
+  assert.equal((await req(`/organizations/${orgId}/analytics`, "GET", null, who.carol)).status, 403);
+  await req("/communities/launchpad/join", "POST", undefined, erin);
+  await req("/posts", "POST", { community: "launchpad", body: "Team post one" }, erin);
+  await req("/posts", "POST", { community: "launchpad", body: "Team post two" }, erin);
+  const a = await req(`/organizations/${orgId}/analytics`, "GET", null, dan);
+  assert.equal(a.status, 200);
+  assert.equal(a.body.team.size, 3, "owner + 2 active");
+  assert.equal(a.body.team.admins, 1);
+  assert.equal(a.body.team.members, 1);
+  assert.equal(a.body.engagementLast30Days.posts, 2);
+  assert.equal(a.body.engagementLast30Days.activePosters, 1);
+  assert.equal(a.body.team.growthByMonth.length, 6);
+  assert.equal(a.body.team.growthByMonth.at(-1).joined, 2);
+  assert.ok(a.body.communities.launchpad >= 1);
+  // Team admin cannot remove the other admin... but Erin can leave by herself.
+  const erinRow = (await req("/organizations/mine", "GET", null, dan)).body.items.find((o) => o.id === orgId).OrganizationMembers.find((m) => m.UserId === erin.id);
+  assert.equal((await req(`/organizations/${orgId}/team/${danRow.id}`, "PATCH", {}, erin)).status, 403);
+  assert.equal((await req(`/organizations/${orgId}/team/${erinRow.id}`, "PATCH", {}, erin)).status, 200);
+  assert.equal((await req("/organizations/mine", "GET", null, erin)).body.items.some((o) => o.id === orgId), false);
+  assert.equal((await req(`/organizations/${orgId}/analytics`, "GET", null, dan)).body.team.removed, 1);
 });

@@ -32,6 +32,9 @@ import { enqueueEmail } from "./jobs.js";
 import { config } from "./config.js";
 import { logger } from "./logger.js";
 import { forgotLimiter } from "./ratelimit.js";
+import { checkSecondFactor } from "./mfa.js";
+import storage from "./storage.js";
+import { destroyAssets } from "./media.js";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -47,6 +50,7 @@ export function registerIdentityRoutes(app, deps) {
     audit,
     authLimit,
     publicUser,
+    sequelize,
   } = deps;
 
   // ---- Email verification ------------------------------------------------
@@ -248,22 +252,82 @@ export function registerIdentityRoutes(app, deps) {
       const confirm = clean(req.body?.confirm, 20);
       if (confirm !== "DELETE") return fail(res, 400, "confirmation_required");
       const u = req.user;
-      const anonEmail = `deleted+${u.id}@deleted.usam.local`;
-      await u.update({
-        status: "deleted",
-        isDeleted: true,
-        deletedAt: new Date(),
-        email: anonEmail,
-        name: "Deleted member",
-        bio: "",
-        location: "",
-        skills: "[]",
-        avatarUrl: "",
-        discoverable: false,
-        messagesEnabled: false,
+      // Re-authenticate: a borrowed/stolen session alone must not be able to
+      // erase an account. Password accounts confirm the password; accounts
+      // with two-factor also confirm a current code.
+      const googleOnly = u.authProvider === "google" && String(u.passwordHash).startsWith("!google:");
+      if (googleOnly) {
+        // No password exists: require a sign-in from the last 15 minutes.
+        const started = req.session?.createdAt ? new Date(req.session.createdAt).getTime() : 0;
+        if (Date.now() - started > 15 * 60_000)
+          return fail(res, 401, "reauthentication_required");
+      } else {
+        const pw = typeof req.body?.password === "string" ? req.body.password : "";
+        if (!pw || !(await bcrypt.compare(pw, u.passwordHash)))
+          return fail(res, 401, "invalid_current_password");
+      }
+      if (u.mfaEnabledAt) {
+        const r = await checkSecondFactor(u, String(req.body?.mfaCode || "").slice(0, 32));
+        if (!r.ok) return fail(res, 401, "invalid_mfa_code");
+      }
+      const previousAvatar = u.avatarUrl;
+      const M = sequelize.models;
+      const now = new Date();
+      await sequelize.transaction(async (t) => {
+        await u.update(
+          {
+            status: "deleted",
+            isDeleted: true,
+            deletedAt: now,
+            email: `deleted+${u.id}@deleted.usam.local`,
+            name: "Deleted member",
+            bio: "",
+            location: "",
+            skills: "[]",
+            avatarUrl: "",
+            discoverable: false,
+            messagesEnabled: false,
+            googleId: null,
+            mfaSecretEnc: null,
+            mfaEnabledAt: null,
+            mfaRecoveryHashes: null,
+          },
+          { transaction: t },
+        );
+        await Session.destroy({ where: { UserId: u.id }, transaction: t });
+        // Social graph and personal settings go immediately.
+        await M.Follow.destroy({ where: { [Op.or]: [{ FollowerId: u.id }, { FollowingId: u.id }] }, transaction: t });
+        await M.Block.destroy({ where: { [Op.or]: [{ UserId: u.id }, { BlockedUserId: u.id }] }, transaction: t });
+        await M.SavedSearch.destroy({ where: { UserId: u.id }, transaction: t });
+        await M.Membership.destroy({ where: { UserId: u.id }, transaction: t });
+        // Stop billing and release seats; payment records stay (accounting).
+        await M.Subscription.update(
+          { status: "canceled", canceledAt: now },
+          { where: { UserId: u.id, status: { [Op.in]: ["active", "free", "pending_payment"] } }, transaction: t },
+        );
+        await M.Registration.update(
+          { status: "cancelled" },
+          { where: { UserId: u.id, status: { [Op.in]: ["registered", "waitlisted", "pending_payment"] } }, transaction: t },
+        );
+        // Optional: also remove what the member published.
+        if (req.body?.deleteContent === true) {
+          await M.Post.update({ status: "hidden" }, { where: { UserId: u.id }, transaction: t });
+          await M.Comment.destroy({ where: { UserId: u.id }, transaction: t });
+        }
       });
-      await Session.destroy({ where: { UserId: u.id } });
-      await audit(req, "delete_account", "user", u.id);
+      // Files are deleted outside the transaction (best effort, logged).
+      if (previousAvatar) {
+        const key = storage.keyFromUrl(previousAvatar);
+        if (key) storage.deleteObject(key).catch(() => {});
+      }
+      const assets = await M.MediaAsset.findAll({
+        where:
+          req.body?.deleteContent === true
+            ? { UserId: u.id }
+            : { UserId: u.id, PostId: null },
+      });
+      await destroyAssets(assets);
+      await audit(req, "delete_account", "user", u.id, req.body?.deleteContent === true ? "with_content" : "");
       logger.info("account.deleted", { userId: u.id });
       res.clearCookie(SESSION_COOKIE, cookieOptions({ maxAge: 0 })).json({
         ok: true,

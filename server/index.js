@@ -51,6 +51,7 @@ import {
   VerificationToken,
   OutboxMessage,
   WebhookEvent,
+  MediaAsset,
   publicUser,
   seedReferenceData,
   isPostgres,
@@ -77,16 +78,26 @@ import {
 } from "./ratelimit.js";
 import { registerIdentityRoutes } from "./identity.js";
 import { registerMfaRoutes, checkSecondFactor } from "./mfa.js";
+import { registerRealtimeRoutes, publish, closeAllStreams } from "./realtime.js";
+import { registerGoogleRoutes } from "./google.js";
 import { registerPaymentRoutes, runPaymentMaintenance } from "./payments.js";
 import { runNotificationDigests } from "./notifications.js";
 import { runHousekeeping } from "./housekeeping.js";
 import paymob from "./paymob.js";
-import { registerMediaRoutes } from "./media.js";
+import { registerMediaRoutes, destroyAssets } from "./media.js";
 import { registerAccountRoutes } from "./account.js";
 import { migrateUp } from "./migrate.js";
 
 // The signed-in user's own view: public profile + private security flags.
-const selfUser = (u) => u && { ...publicUser(u), mfaEnabled: !!u.mfaEnabledAt };
+const selfUser = (u) =>
+  u && {
+    ...publicUser(u),
+    mfaEnabled: !!u.mfaEnabledAt,
+    authProvider: u.authProvider,
+    googleLinked: !!u.googleId,
+    // Google-created accounts have no usable password until they set one.
+    hasPassword: !String(u.passwordHash || "").startsWith("!"),
+  };
 
 const app = express();
 app.disable("x-powered-by");
@@ -129,7 +140,7 @@ const smallJson = express.json({ limit: "80kb" });
 const uploadJson = express.json({
   limit: `${Math.ceil((config.storage.maxUploadBytes * 1.4) / 1024) + 64}kb`,
 });
-const UPLOAD_PATHS = new Set(["/api/v1/users/me/avatar"]);
+const UPLOAD_PATHS = new Set(["/api/v1/users/me/avatar", "/api/v1/media/images"]);
 app.use((req, res, next) =>
   UPLOAD_PATHS.has(req.path) ? uploadJson(req, res, next) : smallJson(req, res, next),
 );
@@ -376,8 +387,16 @@ async function notify(UserId, kind, text, href) {
     const prefs = await NotificationPreference.findOne({ where: { UserId } });
     const allow = prefs ? JSON.parse(prefs.kinds || "[]") : [];
     if (allow.length && !allow.includes(kind)) return;
-    if (!prefs || prefs.inApp !== false)
-      await Notification.create({ UserId, kind, text, href });
+    if (!prefs || prefs.inApp !== false) {
+      const n = await Notification.create({ UserId, kind, text, href });
+      publish(UserId, "notification", {
+        id: n.id,
+        kind,
+        text,
+        href,
+        createdAt: n.createdAt,
+      });
+    }
     if (prefs?.email && prefs.digest === "off") {
       const member = await User.findByPk(UserId, {
         attributes: ["email", "name", "isDeleted", "status"],
@@ -431,6 +450,14 @@ const postInclude = [
     model: Community,
     attributes: ["id", "slug", "nameAr", "nameEn", "accent"],
   },
+  // One-to-few (max 4 per post), so joining does not multiply rows badly.
+  {
+    model: MediaAsset,
+    as: "images",
+    attributes: ["id", "url", "width", "height", "alt", "position"],
+    separate: true,
+    order: [["position", "ASC"]],
+  },
 ];
 // Counts + the viewer's own liked/saved flags for a PAGE of posts, via small
 // grouped queries. This replaced eager-loading every Comment/Reaction/Bookmark
@@ -476,12 +503,69 @@ const safePost = (p, viewer, stats) => ({
     persona: p.User.persona,
   },
   community: p.Community,
+  images: (p.images || []).map((i) => ({ id: i.id, url: i.url, width: i.width, height: i.height, alt: i.alt })),
   commentsCount: stats?.comments ?? 0,
   reactionsCount: stats?.reactions ?? 0,
   liked: !!stats?.liked,
   saved: !!stats?.saved,
   own: p.UserId === viewer?.id,
 });
+// Public event representation: aggregate seat counts plus ONLY the viewer's
+// own registration status (no other attendees, no ticket codes).
+async function eventViews(events, viewer) {
+  if (!events.length) return [];
+  const ids = events.map((e) => e.id);
+  const now = new Date();
+  const [counts, mine] = await Promise.all([
+    Registration.findAll({
+      where: {
+        EventId: { [Op.in]: ids },
+        [Op.or]: [
+          { status: { [Op.in]: ["registered", "waitlisted"] } },
+          { status: "pending_payment", paymentExpiresAt: { [Op.gt]: now } },
+        ],
+      },
+      attributes: ["EventId", "status", [sequelize.fn("COUNT", sequelize.col("id")), "n"]],
+      group: ["EventId", "status"],
+      raw: true,
+    }),
+    viewer
+      ? Registration.findAll({
+          where: { EventId: { [Op.in]: ids }, UserId: viewer.id },
+          attributes: ["EventId", "status", "paymentExpiresAt", "checkedInAt"],
+        })
+      : [],
+  ]);
+  const c = new Map();
+  for (const r of counts) {
+    const m = c.get(r.EventId) || {};
+    m[r.status] = Number(r.n);
+    c.set(r.EventId, m);
+  }
+  return events.map((e) => {
+    const m = c.get(e.id) || {};
+    const own = mine.find((r) => r.EventId === e.id && r.status !== "cancelled");
+    const registered = m.registered || 0;
+    const held = m.pending_payment || 0;
+    const json = e.toJSON();
+    delete json.Registrations;
+    return {
+      ...json,
+      registeredCount: registered,
+      waitlistCount: m.waitlisted || 0,
+      seatsLeft: Math.max(0, e.capacity - registered - held),
+      myRegistration: own
+        ? {
+            status:
+              own.status === "pending_payment" && own.paymentExpiresAt <= now
+                ? "expired"
+                : own.status,
+            checkedIn: !!own.checkedInAt,
+          }
+        : null,
+    };
+  });
+}
 async function getPosts(where, user, limit = 30) {
   const denied = user
     ? await Block.findAll({
@@ -598,7 +682,7 @@ app.post("/api/v1/auth/signup", async (req, res, next) => {
     res
       .cookie(SESSION_COOKIE, token, cookieOptions())
       .status(201)
-      .json({ user: publicUser(user) });
+      .json({ user: selfUser(user) });
   } catch (e) {
     next(e);
   }
@@ -1026,13 +1110,17 @@ app.get("/api/v1/my-events", auth, async (req, res, next) => {
     const items = await Registration.findAll({
       where: {
         UserId: req.user.id,
-        status: { [Op.in]: ["registered", "waitlisted"] },
+        [Op.or]: [
+          { status: { [Op.in]: ["registered", "waitlisted"] } },
+          { status: "pending_payment", paymentExpiresAt: { [Op.gt]: new Date() } },
+        ],
       },
+      attributes: { exclude: ["ticketCode"] },
       include: [
         {
           model: Event,
           where: { status: "published" },
-          attributes: ["id", "title", "startsAt", "timezone", "venue"],
+          attributes: ["id", "title", "startsAt", "timezone", "venue", "priceType", "priceEgp"],
         },
       ],
       order: [["createdAt", "DESC"]],
@@ -1169,7 +1257,7 @@ app.patch("/api/v1/me", auth, async (req, res, next) => {
           .filter(Boolean),
       );
     await req.user.update(updates);
-    res.json({ user: publicUser(req.user) });
+    res.json({ user: selfUser(req.user) });
   } catch (e) {
     next(e);
   }
@@ -1239,7 +1327,18 @@ app.get("/api/v1/posts", async (req, res, next) => {
       });
       where.UserId = { [Op.in]: follows.map((f) => f.FollowingId) };
     }
-    res.json({ items: await getPosts(where, req.user) });
+    // Cursor pagination (newest first): `before` = createdAt of the last post
+    // already shown. Fetch one extra row to know whether more exist.
+    const PAGE = Math.min(100, Math.max(1, Number.parseInt(req.query.limit, 10) || 20));
+    if (req.query.before) {
+      const before = new Date(String(req.query.before));
+      if (Number.isNaN(before.getTime())) return fail(res, 400, "invalid_cursor");
+      where.createdAt = { [Op.lt]: before };
+    }
+    const rows = await getPosts(where, req.user, PAGE + 1);
+    const hasMore = rows.length > PAGE;
+    const items = rows.slice(0, PAGE);
+    res.json({ items, hasMore, nextBefore: hasMore ? items.at(-1).createdAt : null });
   } catch (e) {
     next(e);
   }
@@ -1290,10 +1389,28 @@ app.post("/api/v1/posts", auth, requireVerified, async (req, res, next) => {
       }))
     )
       return fail(res, 403, "join_community_first");
-    const p = await Post.create({
-      UserId: req.user.id,
-      CommunityId: c.id,
-      body,
+    // Optional images: ids of MY uploads (POST /media/images) that are not
+    // attached to any post yet. Max 4, order preserved.
+    const rawIds = Array.isArray(req.body.imageIds) ? req.body.imageIds : [];
+    if (rawIds.length > 4) return fail(res, 400, "too_many_images");
+    const imageIds = [...new Set(rawIds.map(String))];
+    if (imageIds.some((x) => !UUID_RE.test(x))) return fail(res, 400, "invalid_image");
+    const p = await sequelize.transaction(async (t) => {
+      const assets = imageIds.length
+        ? await MediaAsset.findAll({
+            where: { id: { [Op.in]: imageIds }, UserId: req.user.id, PostId: null },
+            transaction: t,
+          })
+        : [];
+      if (assets.length !== imageIds.length)
+        throw Object.assign(new Error("invalid_image"), { status: 400 });
+      const post = await Post.create(
+        { UserId: req.user.id, CommunityId: c.id, body },
+        { transaction: t },
+      );
+      for (const a of assets)
+        await a.update({ PostId: post.id, position: imageIds.indexOf(a.id) }, { transaction: t });
+      return post;
     });
     res.status(201).json({ id: p.id });
   } catch (e) {
@@ -1320,6 +1437,10 @@ app.delete("/api/v1/posts/:id", auth, async (req, res, next) => {
     if (p.UserId !== req.user.id && !hasRole(req.user, "moderator"))
       return fail(res, 403, "forbidden");
     await p.update({ status: "hidden" });
+    // An author deleting their own post also deletes its image files (they
+    // are publicly addressable). A moderator removal keeps them for review.
+    if (p.UserId === req.user.id)
+      await destroyAssets(await MediaAsset.findAll({ where: { PostId: p.id } }));
     res.json({ ok: true });
   } catch (e) {
     next(e);
@@ -1430,34 +1551,147 @@ app.get("/api/v1/saved", auth, async (req, res, next) => {
 });
 app.get("/api/v1/events", async (req, res, next) => {
   try {
-    res.json({
-      items: await Event.findAll({
-        where: { status: "published" },
-        include: [
-          { model: Community, attributes: ["slug", "nameAr", "nameEn"] },
-          { model: Registration, attributes: ["UserId", "status"] },
-        ],
-        order: [["startsAt", "ASC"]],
-      }),
+    // Upcoming by default; `past=1` for history. Never exposes other members'
+    // registrations (previously every attendee's UserId was returned here).
+    const past = req.query.past === "1";
+    const events = await Event.findAll({
+      where: {
+        status: "published",
+        startsAt: past ? { [Op.lt]: new Date() } : { [Op.gte]: new Date(Date.now() - 6 * 3600_000) },
+      },
+      include: [{ model: Community, attributes: ["slug", "nameAr", "nameEn"] }],
+      order: [["startsAt", past ? "DESC" : "ASC"]],
+      limit: 100,
     });
+    const views = await eventViews(events, req.user);
+    res.json({ items: views });
   } catch (e) {
     next(e);
   }
 });
 app.get("/api/v1/events/:id", async (req, res, next) => {
   try {
+    // SECURITY: this route is public. It previously included EVERY
+    // Registration row (other members' ids and their ticket codes, which are
+    // the check-in credential). Now: aggregate counts + only the viewer's own
+    // registration.
     const e = await Event.findOne({
       where: { id: req.params.id, status: "published" },
-      include: [Community, Registration],
+      include: [Community],
     });
     if (!e) return fail(res, 404, "not_found");
-    res.json({ item: e });
+    const [view] = await eventViews([e], req.user);
+    res.json({ item: view });
   } catch (e) {
     next(e);
   }
 });
+// Paid seats are held this long while the member is on the hosted checkout.
+const PAID_SEAT_HOLD_MS = 30 * 60_000;
+// Paid event ticket: hold a seat (pending_payment), create a PaymentAttempt
+// for the server-side price, and open the Paymob hosted checkout. The seat is
+// confirmed (ticket code issued) ONLY by the signature-verified webhook /
+// reconciliation in payments.js. Retrying while a hold is open reuses it.
+async function registerPaid(req, res, next) {
+  try {
+    if (!paymob.isConfigured())
+      return fail(res, 409, "payment_provider_activation_required");
+    const outcome = await sequelize.transaction(async (t) => {
+      const e = await Event.findOne({
+        where: { id: req.params.id, status: "published", priceType: "paid" },
+        transaction: t,
+        lock: t.LOCK.UPDATE,
+      });
+      if (!e) throw Object.assign(new Error("event_unavailable"), { status: 404 });
+      if (!(e.priceEgp > 0)) throw Object.assign(new Error("event_unavailable"), { status: 404 });
+      if (new Date(e.startsAt) < new Date())
+        throw Object.assign(new Error("event_started"), { status: 409 });
+      const now = new Date();
+      const existing = await Registration.findOne({
+        where: { EventId: e.id, UserId: req.user.id },
+        transaction: t,
+      });
+      if (existing?.status === "registered") return { status: "registered" };
+      const holdOpen =
+        existing?.status === "pending_payment" && existing.paymentExpiresAt > now;
+      if (holdOpen) {
+        const attempt = await PaymentAttempt.findOne({
+          where: { RegistrationId: existing.id, status: { [Op.in]: ["created", "pending"] } },
+          order: [["createdAt", "DESC"]],
+          transaction: t,
+        });
+        if (attempt) return { status: "pending_payment", attempt, registration: existing };
+      }
+      const taken = await Registration.count({
+        where: {
+          EventId: e.id,
+          id: existing ? { [Op.ne]: existing.id } : { [Op.ne]: null },
+          [Op.or]: [
+            { status: "registered" },
+            { status: "pending_payment", paymentExpiresAt: { [Op.gt]: now } },
+          ],
+        },
+        transaction: t,
+      });
+      if (taken >= e.capacity) throw Object.assign(new Error("event_full"), { status: 409 });
+      const paymentExpiresAt = new Date(Date.now() + PAID_SEAT_HOLD_MS);
+      const registration = existing
+        ? await existing.update(
+            { status: "pending_payment", paymentExpiresAt, ticketCode: null, checkedInAt: null },
+            { transaction: t },
+          )
+        : await Registration.create(
+            { EventId: e.id, UserId: req.user.id, status: "pending_payment", paymentExpiresAt },
+            { transaction: t },
+          );
+      // Cancel any stale attempts for an earlier, expired hold.
+      await PaymentAttempt.update(
+        { status: "canceled" },
+        { where: { RegistrationId: registration.id, status: { [Op.in]: ["created", "pending"] } }, transaction: t },
+      );
+      const attempt = await PaymentAttempt.create(
+        {
+          UserId: req.user.id,
+          RegistrationId: registration.id,
+          idempotencyKey: `event:${registration.id}:${crypto.randomBytes(6).toString("hex")}`,
+          amountEgp: e.priceEgp, // server-side price; never from the client
+          status: "pending",
+          provider: "paymob",
+        },
+        { transaction: t },
+      );
+      return { status: "pending_payment", attempt, registration, event: e };
+    });
+    if (outcome.status === "registered") return res.json({ status: "registered" });
+    const attempt = await PaymentAttempt.findByPk(outcome.attempt.id, {
+      include: [{ model: Registration, include: [Event] }],
+    });
+    let checkout;
+    try {
+      checkout = await routeDeps.initCheckoutForAttempt(attempt, req.user);
+    } catch (err) {
+      logger.error("events.checkout_failed", { error: String(err), attemptId: attempt.id });
+      return fail(res, 502, "payment_initialization_failed");
+    }
+    await audit(req, "event_checkout", "payment_attempt", attempt.id, req.params.id);
+    res.status(202).json({
+      status: "pending_payment",
+      paymentAttemptId: attempt.id,
+      amountEgp: attempt.amountEgp,
+      holdExpiresAt: outcome.registration.paymentExpiresAt,
+      checkoutUrl: checkout.checkoutUrl,
+    });
+  } catch (e) {
+    next(e);
+  }
+}
 app.post("/api/v1/events/:id/register", auth, requireVerified, async (req, res, next) => {
   try {
+    const target = await Event.findOne({
+      where: { id: req.params.id, status: "published" },
+      attributes: ["id", "priceType"],
+    });
+    if (target?.priceType === "paid") return registerPaid(req, res, next);
     const result = await sequelize.transaction(async (t) => {
       const e = await Event.findOne({
         where: { id: req.params.id, status: "published", priceType: "free" },
@@ -1511,6 +1745,22 @@ app.delete("/api/v1/events/:id/register", auth, async (req, res, next) => {
         transaction: t,
       });
       if (!registration || registration.status === "cancelled") return;
+      if (event.priceType === "paid") {
+        // A paid, confirmed ticket is cancelled through a refund (admin
+        // Payments panel) so money and seat stay consistent. An unpaid hold
+        // can simply be released.
+        if (registration.status === "registered")
+          throw Object.assign(new Error("paid_ticket_refund_required"), { status: 409 });
+        await registration.update({ status: "cancelled" }, { transaction: t });
+        await PaymentAttempt.update(
+          { status: "canceled" },
+          {
+            where: { RegistrationId: registration.id, status: { [Op.in]: ["created", "pending"] } },
+            transaction: t,
+          },
+        );
+        return;
+      }
       const freed = registration.status === "registered";
       await registration.update({ status: "cancelled" }, { transaction: t });
       if (freed) {
@@ -1874,12 +2124,64 @@ app.get("/api/v1/messages", auth, async (req, res, next) => {
       order: [["updatedAt", "DESC"]],
       limit: 50,
     });
+    const ids = rows.map((c) => c.id);
+    // Last message preview + unread count per conversation (two grouped
+    // queries, not 2N).
+    const [lastRows, unreadRows] = ids.length
+      ? await Promise.all([
+          Message.findAll({
+            where: { ConversationId: { [Op.in]: ids } },
+            attributes: [
+              "ConversationId",
+              [sequelize.fn("MAX", sequelize.col("createdAt")), "at"],
+            ],
+            group: ["ConversationId"],
+            raw: true,
+          }).then((maxes) =>
+            maxes.length
+              ? Message.findAll({
+                  where: {
+                    [Op.or]: maxes.map((x) => ({
+                      ConversationId: x.ConversationId,
+                      createdAt: new Date(x.at),
+                    })),
+                  },
+                  attributes: ["ConversationId", "body", "SenderId", "createdAt"],
+                })
+              : [],
+          ),
+          Message.findAll({
+            where: {
+              ConversationId: { [Op.in]: ids },
+              SenderId: { [Op.ne]: req.user.id },
+              readAt: null,
+            },
+            attributes: [
+              "ConversationId",
+              [sequelize.fn("COUNT", sequelize.col("id")), "n"],
+            ],
+            group: ["ConversationId"],
+            raw: true,
+          }),
+        ])
+      : [[], []];
+    const last = new Map();
+    for (const m of lastRows) if (!last.has(m.ConversationId)) last.set(m.ConversationId, m);
+    const unread = new Map(unreadRows.map((r) => [r.ConversationId, Number(r.n)]));
     res.json({
-      items: rows.map((c) => ({
-        id: c.id,
-        other: c.FirstUserId === req.user.id ? c.second : c.first,
-        updatedAt: c.updatedAt,
-      })),
+      items: rows.map((c) => {
+        const m = last.get(c.id);
+        return {
+          id: c.id,
+          other: c.FirstUserId === req.user.id ? c.second : c.first,
+          updatedAt: c.updatedAt,
+          lastMessage: m
+            ? { body: m.body.slice(0, 120), mine: m.SenderId === req.user.id, createdAt: m.createdAt }
+            : null,
+          unread: unread.get(c.id) || 0,
+        };
+      }),
+      unreadTotal: [...unread.values()].reduce((a, b) => a + b, 0),
     });
   } catch (e) {
     next(e);
@@ -1944,12 +2246,29 @@ app.get("/api/v1/messages/:id", auth, async (req, res, next) => {
       c.FirstUserId === req.user.id ? c.SecondUserId : c.FirstUserId,
       { attributes: ["id", "name", "username"] },
     );
-    const items = await Message.findAll({
-      where: { ConversationId: c.id },
-      order: [["createdAt", "ASC"]],
-      limit: 100,
+    // Newest page first (previously the OLDEST 100 were returned, so long
+    // threads stopped showing new messages). `before` = ISO timestamp cursor
+    // for loading older history.
+    const PAGE = 50;
+    const where = { ConversationId: c.id };
+    if (req.query.before) {
+      const before = new Date(String(req.query.before));
+      if (Number.isNaN(before.getTime())) return fail(res, 400, "invalid_cursor");
+      where.createdAt = { [Op.lt]: before };
+    }
+    const page = await Message.findAll({
+      where,
+      order: [["createdAt", "DESC"]],
+      limit: PAGE + 1,
     });
-    res.json({ other, items });
+    const hasMore = page.length > PAGE;
+    const items = page.slice(0, PAGE).reverse();
+    res.json({
+      other,
+      items,
+      hasMore,
+      nextBefore: hasMore ? items[0].createdAt : null,
+    });
   } catch (e) {
     next(e);
   }
@@ -1971,6 +2290,9 @@ app.post("/api/v1/messages/:id", auth, requireVerified, async (req, res, next) =
       body,
     });
     await c.update({ updatedAt: new Date() });
+    const live = { conversationId: c.id, messageId: m.id, senderId: req.user.id };
+    publish(recipientId, "message", live);
+    publish(req.user.id, "message", live); // the sender's other tabs
     await notify(
       recipientId,
       "message",
@@ -1996,6 +2318,10 @@ app.patch("/api/v1/messages/:id/read", auth, async (req, res, next) => {
         },
       },
     );
+    // Read receipts: the other participant's open thread can update.
+    const otherId = c.FirstUserId === req.user.id ? c.SecondUserId : c.FirstUserId;
+    publish(otherId, "read", { conversationId: c.id });
+    publish(req.user.id, "read", { conversationId: c.id });
     res.json({ ok: true });
   } catch (e) {
     next(e);
@@ -2215,8 +2541,26 @@ app.get("/api/v1/members/:username", async (req, res, next) => {
 });
 app.get("/api/v1/members", async (req, res, next) => {
   try {
+    // Directory: only opted-in, active accounts. Optional server-side search
+    // (`q` on name/username/location/bio), `persona` filter and pages.
+    const where = { discoverable: true, isDeleted: false, status: "active" };
+    const q = clean(req.query.q, 80);
+    if (q.length >= 2)
+      where[Op.or] = [
+        { name: contains(q) },
+        { username: contains(q) },
+        { location: contains(q) },
+        { bio: contains(q) },
+      ];
+    const persona = clean(req.query.persona, 30);
+    if (["launchpad", "freelancespace", "hrconnect", "studentzone"].includes(persona))
+      where.persona = persona;
+    const pageSize = 48;
+    const page = Math.max(1, Math.min(1000, Number.parseInt(req.query.page, 10) || 1));
     const rows = await User.findAll({
-      where: { discoverable: true },
+      where,
+      order: [["createdAt", "DESC"]],
+      offset: (page - 1) * pageSize,
       attributes: [
         "id",
         "name",
@@ -2225,9 +2569,13 @@ app.get("/api/v1/members", async (req, res, next) => {
         "bio",
         "location",
         "skills",
+        "avatarUrl",
+        "createdAt",
       ],
-      limit: 50,
+      limit: pageSize + 1,
     });
+    const hasMore = rows.length > pageSize;
+    rows.splice(pageSize);
     const blockedIds = req.user
       ? (
           await Block.findAll({
@@ -2242,6 +2590,8 @@ app.get("/api/v1/members", async (req, res, next) => {
       : [];
     res.json({
       items: rows.filter((u) => !blockedIds.includes(u.id)).map(publicUser),
+      page,
+      hasMore,
     });
   } catch (e) {
     next(e);
@@ -2280,13 +2630,50 @@ app.get("/api/v1/search", async (req, res, next) => {
 });
 app.get("/api/v1/notifications", auth, async (req, res, next) => {
   try {
+    // Cursor pagination: `before` = createdAt of the last item already shown.
+    const PAGE = 30;
+    const where = { UserId: req.user.id };
+    if (req.query.before) {
+      const before = new Date(String(req.query.before));
+      if (Number.isNaN(before.getTime())) return fail(res, 400, "invalid_cursor");
+      where.createdAt = { [Op.lt]: before };
+    }
+    const [rows, unreadCount] = await Promise.all([
+      Notification.findAll({ where, order: [["createdAt", "DESC"]], limit: PAGE + 1 }),
+      Notification.count({ where: { UserId: req.user.id, readAt: null } }),
+    ]);
+    const hasMore = rows.length > PAGE;
+    const items = rows.slice(0, PAGE);
     res.json({
-      items: await Notification.findAll({
-        where: { UserId: req.user.id },
-        order: [["createdAt", "DESC"]],
-        limit: 50,
-      }),
+      items,
+      unreadCount,
+      hasMore,
+      nextBefore: hasMore ? items.at(-1).createdAt : null,
     });
+  } catch (e) {
+    next(e);
+  }
+});
+// Badge counts for the app shell (one cheap call, refreshed on live events).
+app.get("/api/v1/me/unread", auth, async (req, res, next) => {
+  try {
+    const convs = await Conversation.findAll({
+      where: { [Op.or]: [{ FirstUserId: req.user.id }, { SecondUserId: req.user.id }] },
+      attributes: ["id"],
+    });
+    const [notifications, messages] = await Promise.all([
+      Notification.count({ where: { UserId: req.user.id, readAt: null } }),
+      convs.length
+        ? Message.count({
+            where: {
+              ConversationId: { [Op.in]: convs.map((c) => c.id) },
+              SenderId: { [Op.ne]: req.user.id },
+              readAt: null,
+            },
+          })
+        : 0,
+    ]);
+    res.json({ notifications, messages });
   } catch (e) {
     next(e);
   }
@@ -2652,10 +3039,109 @@ app.post("/api/v1/partnerships", auth, requireVerified, requireFlag("partnership
   }
 });
 
+// Owner, active team admin, or platform admin.
+async function canManageOrg(org, user) {
+  if (!org || !user) return false;
+  if (org.OwnerId === user.id || hasRole(user, "admin")) return true;
+  return !!(await OrganizationMember.findOne({
+    where: { OrganizationId: org.id, UserId: user.id, role: "admin", status: "active" },
+  }));
+}
+// Team analytics for managers: real counts from the team's own activity
+// (membership changes, posts, event attendance, community spread). Nothing is
+// estimated; periods are rolling windows ending now.
+app.get("/api/v1/organizations/:id/analytics", auth, async (req, res, next) => {
+  try {
+    const org = await Organization.findByPk(req.params.id);
+    if (!org) return fail(res, 404, "not_found");
+    if (!(await canManageOrg(org, req.user))) return fail(res, 403, "forbidden");
+    const rows = await OrganizationMember.findAll({
+      where: { OrganizationId: org.id },
+      attributes: ["UserId", "role", "status", "createdAt", "updatedAt"],
+    });
+    const active = rows.filter((r) => r.status === "active");
+    const ids = [...new Set([org.OwnerId, ...active.map((r) => r.UserId)])];
+    const since30 = new Date(Date.now() - 30 * 86400_000);
+    const months = [];
+    for (let i = 5; i >= 0; i--) {
+      const d = new Date();
+      d.setUTCDate(1);
+      d.setUTCHours(0, 0, 0, 0);
+      d.setUTCMonth(d.getUTCMonth() - i);
+      months.push(d);
+    }
+    const [posts30, comments30, registrations30, checkIns30, memberships] = await Promise.all([
+      Post.count({ where: { UserId: { [Op.in]: ids }, status: "published", createdAt: { [Op.gte]: since30 } } }),
+      Comment.count({ where: { UserId: { [Op.in]: ids }, createdAt: { [Op.gte]: since30 } } }),
+      Registration.count({ where: { UserId: { [Op.in]: ids }, status: "registered", createdAt: { [Op.gte]: since30 } } }),
+      Registration.count({ where: { UserId: { [Op.in]: ids }, checkedInAt: { [Op.gte]: since30 } } }),
+      Membership.findAll({ where: { UserId: { [Op.in]: ids } }, attributes: ["CommunityId"], raw: true }),
+    ]);
+    const slugs = new Map(
+      (await Community.findAll({ attributes: ["id", "slug"], raw: true })).map((c) => [c.id, c.slug]),
+    );
+    const byCommunity = {};
+    for (const m of memberships) {
+      const k = slugs.get(m.CommunityId);
+      if (k) byCommunity[k] = (byCommunity[k] || 0) + 1;
+    }
+    const activePosters = ids.length
+      ? (
+          await Post.findAll({
+            where: { UserId: { [Op.in]: ids }, status: "published", createdAt: { [Op.gte]: since30 } },
+            attributes: ["UserId"],
+            group: ["UserId"],
+            raw: true,
+          })
+        ).length
+      : 0;
+    res.json({
+      organization: { id: org.id, name: org.name, status: org.status },
+      team: {
+        size: ids.length, // owner + active members
+        admins: active.filter((r) => r.role === "admin").length,
+        members: active.filter((r) => r.role === "member").length,
+        removed: rows.filter((r) => r.status === "removed").length,
+        joinedLast30Days: active.filter((r) => r.createdAt >= since30).length,
+        growthByMonth: months.map((start, i) => {
+          const end = months[i + 1] || new Date(8.64e15);
+          return {
+            month: start.toISOString().slice(0, 7),
+            joined: rows.filter((r) => r.createdAt >= start && r.createdAt < end).length,
+          };
+        }),
+      },
+      engagementLast30Days: {
+        posts: posts30,
+        comments: comments30,
+        activePosters,
+        eventRegistrations: registrations30,
+        eventCheckIns: checkIns30,
+      },
+      communities: byCommunity,
+      generatedAt: new Date().toISOString(),
+    });
+  } catch (e) {
+    next(e);
+  }
+});
 app.get("/api/v1/organizations/mine", auth, async (req, res, next) => {
   try {
-    const owned = await Organization.findAll({
-      where: { OwnerId: req.user.id },
+    // Organizations I own OR belong to (active team member). `myRole` tells
+    // the UI what I may do; only managers (owner / team admin) get the full
+    // team list.
+    const memberships = await OrganizationMember.findAll({
+      where: { UserId: req.user.id, status: "active" },
+      attributes: ["OrganizationId", "role"],
+    });
+    const roleByOrg = new Map(memberships.map((m) => [m.OrganizationId, m.role]));
+    const orgs = await Organization.findAll({
+      where: {
+        [Op.or]: [
+          { OwnerId: req.user.id },
+          ...(roleByOrg.size ? [{ id: { [Op.in]: [...roleByOrg.keys()] } }] : []),
+        ],
+      },
       include: [
         {
           model: OrganizationMember,
@@ -2665,8 +3151,19 @@ app.get("/api/v1/organizations/mine", auth, async (req, res, next) => {
           ],
         },
       ],
+      order: [["createdAt", "ASC"]],
     });
-    res.json({ items: owned });
+    res.json({
+      items: orgs.map((o) => {
+        const myRole = o.OwnerId === req.user.id ? "owner" : roleByOrg.get(o.id) || null;
+        const json = o.toJSON();
+        if (!["owner", "admin"].includes(myRole))
+          json.OrganizationMembers = json.OrganizationMembers.filter(
+            (m) => m.status === "active",
+          ).map((m) => ({ id: m.id, role: m.role, status: m.status, User: m.User }));
+        return { ...json, myRole };
+      }),
+    });
   } catch (e) {
     next(e);
   }
@@ -2675,10 +3172,16 @@ app.post("/api/v1/organizations/:id/team", auth, requireVerified, async (req, re
   try {
     const org = await Organization.findByPk(req.params.id);
     if (!org) return fail(res, 404, "not_found");
-    if (org.OwnerId !== req.user.id && !hasRole(req.user, "admin"))
-      return fail(res, 403, "forbidden");
+    if (!(await canManageOrg(org, req.user))) return fail(res, 403, "forbidden");
     if (org.status !== "approved")
       return fail(res, 409, "organization_not_approved");
+    // Only the owner (or platform admin) may grant the team-admin role.
+    if (
+      clean(req.body.role, 20) === "admin" &&
+      org.OwnerId !== req.user.id &&
+      !hasRole(req.user, "admin")
+    )
+      return fail(res, 403, "owner_required_for_admin_role");
     const member = await User.findOne({
         where: { username: clean(req.body.username, 50) },
       }),
@@ -2714,20 +3217,38 @@ app.patch(
   async (req, res, next) => {
     try {
       const org = await Organization.findByPk(req.params.id);
-      if (!org || (org.OwnerId !== req.user.id && !hasRole(req.user, "admin")))
-        return fail(res, 403, "forbidden");
+      if (!org) return fail(res, 403, "forbidden");
       const item = await OrganizationMember.findOne({
         where: { id: req.params.memberId, OrganizationId: org.id },
       });
+      const self = item && item.UserId === req.user.id;
+      // A member may always leave; changing others needs manager rights.
+      if (!self && !(await canManageOrg(org, req.user))) return fail(res, 403, "forbidden");
       if (!item) return fail(res, 404, "not_found");
+      const isOwner = org.OwnerId === req.user.id || hasRole(req.user, "admin");
+      const role = clean(req.body?.role, 20);
+      if (role) {
+        // Role change (member <-> admin): owner / platform admin only.
+        if (!["admin", "member"].includes(role)) return fail(res, 400, "invalid_role");
+        if (!isOwner) return fail(res, 403, "owner_required_for_admin_role");
+        if (item.status !== "active") return fail(res, 409, "member_not_active");
+        await item.update({ role });
+        await audit(req, "change_organization_role", "organization", org.id, `${item.UserId}:${role}`);
+        return res.json({ ok: true, role });
+      }
+      // Team admins cannot remove other admins; only the owner can.
+      if (!self && item.role === "admin" && !isOwner)
+        return fail(res, 403, "owner_required_for_admin_role");
       await item.update({ status: "removed" });
       await audit(
         req,
-        "remove_organization_member",
+        self ? "leave_organization" : "remove_organization_member",
         "organization",
         org.id,
         item.UserId,
       );
+      if (!self)
+        await notify(item.UserId, "organization_team", `You were removed from ${org.name}`, "/participation");
       res.json({ ok: true });
     } catch (e) {
       next(e);
@@ -3472,13 +3993,17 @@ app.post("/api/v1/admin/events", auth, admin, async (req, res, next) => {
   try {
     const title = clean(req.body.title, 160),
       startsAt = new Date(req.body.startsAt),
-      capacity = Number(req.body.capacity);
+      capacity = Number(req.body.capacity),
+      paid = req.body.priceType === "paid",
+      priceEgp = paid ? Number(req.body.priceEgp) : 0;
     if (
       title.length < 3 ||
       isNaN(startsAt) ||
+      !Number.isInteger(capacity) ||
       capacity < 1 ||
       capacity > 100000 ||
-      req.body.priceType === "paid"
+      !["free", "paid", undefined].includes(req.body.priceType) ||
+      (paid && (!Number.isInteger(priceEgp) || priceEgp < 1 || priceEgp > 100000))
     )
       return fail(res, 400, "invalid_event");
     const c = await Community.findOne({ where: { slug: req.body.community } });
@@ -3492,9 +4017,10 @@ app.post("/api/v1/admin/events", auth, admin, async (req, res, next) => {
       CommunityId: c.id,
       OrganizerId: req.user.id,
       status: "published",
-      priceType: "free",
+      priceType: paid ? "paid" : "free",
+      priceEgp,
     });
-    await audit(req, "create_event", "event", e.id);
+    await audit(req, "create_event", "event", e.id, paid ? `paid:${priceEgp}` : "free");
     res.status(201).json({ id: e.id });
   } catch (e) {
     next(e);
@@ -3539,6 +4065,9 @@ const routeDeps = {
   PaymentAttempt,
   Notification,
   AuditLog,
+  Registration,
+  Event,
+  MediaAsset,
   // middleware + helpers
   auth,
   admin,
@@ -3559,6 +4088,8 @@ const routeDeps = {
 };
 registerIdentityRoutes(app, routeDeps);
 registerMfaRoutes(app, routeDeps);
+registerGoogleRoutes(app, routeDeps);
+registerRealtimeRoutes(app, routeDeps);
 registerPaymentRoutes(app, routeDeps);
 registerMediaRoutes(app, routeDeps);
 registerAccountRoutes(app, routeDeps);
@@ -3649,7 +4180,16 @@ async function boot() {
     runNotificationDigests({ User, Notification, NotificationPreference }),
   );
   registerScheduled("housekeeping", 24 * 3600_000, () =>
-    runHousekeeping({ Session, VerificationToken, OutboxMessage, WebhookEvent, Notification }),
+    runHousekeeping({
+      Session,
+      VerificationToken,
+      OutboxMessage,
+      WebhookEvent,
+      Notification,
+      MediaAsset,
+      User,
+      models: sequelize.models,
+    }),
   );
   startWorker();
 
@@ -3666,6 +4206,7 @@ async function boot() {
     shuttingDown = true;
     logger.info("server.shutdown_start", { signal });
     stopWorker();
+    closeAllStreams(); // SSE connections never go idle on their own
     const force = setTimeout(() => {
       logger.error("server.shutdown_forced", {});
       process.exit(1);

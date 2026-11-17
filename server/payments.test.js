@@ -288,3 +288,84 @@ test("maintenance expires abandoned pending payments, ended terms, and sends one
   assert.equal(again.reminders, 0, "reminder must be sent only once per term");
   void cookie;
 });
+
+// ---- Paid events (tickets) -------------------------------------------------
+test("paid event tickets: seat hold, capacity, webhook confirmation, refund releases the seat", async () => {
+  const { Registration, Event, Community, Plan } = await import("./db.js");
+  const { Op } = await import("sequelize");
+  const community = await Community.findOne({ where: { slug: "launchpad" } });
+  const startsAt = new Date(Date.now() + 7 * 86400_000).toISOString();
+  // Admin validation: a paid event needs a whole positive price.
+  for (const bad of [{ priceEgp: 0 }, { priceEgp: -5 }, { priceEgp: 9.5 }, { priceEgp: "abc" }]) {
+    const r = await req("/admin/events", "POST", { title: "Bad paid", startsAt, capacity: 1, community: "launchpad", priceType: "paid", ...bad }, adminCookie);
+    assert.equal(r.status, 400, JSON.stringify(bad));
+  }
+  assert.equal((await req("/admin/events", "POST", { title: "Paid by member", startsAt, capacity: 1, community: "launchpad", priceType: "paid", priceEgp: 250 }, memberCookie)).status, 403);
+  const created = await req("/admin/events", "POST", { title: "Founders Dinner", startsAt, capacity: 1, community: "launchpad", priceType: "paid", priceEgp: 250 }, adminCookie);
+  assert.equal(created.status, 201);
+  const eventId = created.body.id;
+
+  const buyer = await signup("ticket-a@example.test");
+  const rival = await signup("ticket-b@example.test");
+  const attemptsBefore = await PaymentAttempt.count();
+  const hold = await req(`/events/${eventId}/register`, "POST", undefined, buyer);
+  assert.equal(hold.status, 202);
+  assert.equal(hold.body.status, "pending_payment");
+  assert.equal(hold.body.amountEgp, 250, "price comes from the event, not the client");
+  assert.match(hold.body.checkoutUrl, /^https:\/\/accept\.paymob\.com\/api\/acceptance\/iframes\/999\?payment_token=/);
+  assert.equal(await PaymentAttempt.count(), attemptsBefore + 1);
+  // Retrying reuses the open hold + attempt.
+  const again = await req(`/events/${eventId}/register`, "POST", undefined, buyer);
+  assert.equal(again.body.paymentAttemptId, hold.body.paymentAttemptId);
+  assert.equal(await PaymentAttempt.count(), attemptsBefore + 1);
+
+  const view = (await req(`/events/${eventId}`, "GET", undefined, buyer)).body.item;
+  assert.equal(view.myRegistration.status, "pending_payment");
+  assert.equal(view.seatsLeft, 0, "the held seat is not sold twice");
+  assert.equal((await req(`/events/${eventId}/ticket`, "GET", undefined, buyer)).status, 404, "no ticket before payment");
+  const full = await req(`/events/${eventId}/register`, "POST", undefined, rival);
+  assert.equal(full.status, 409);
+  assert.equal(full.body.error, "event_full");
+
+  // Wrong amount is refused; the correct signed success issues the ticket.
+  const bad = signedWebhook(txnFor(hold.body.paymentAttemptId, 25));
+  await req(bad.path, "POST", bad.body);
+  assert.equal((await Registration.findOne({ where: { EventId: eventId, status: "registered" } })), null);
+  const good = signedWebhook(txnFor(hold.body.paymentAttemptId, 250));
+  assert.equal((await req(good.path, "POST", good.body)).status, 200);
+  const ticket = await req(`/events/${eventId}/ticket`, "GET", undefined, buyer);
+  assert.equal(ticket.status, 200);
+  assert.match(ticket.body.ticket.code, /^[0-9A-F]{20}$/);
+  const buyerUser = await User.findOne({ where: { email: "ticket-a@example.test" } });
+  const mails = (await OutboxMessage.findAll({ where: { kind: "email" } })).map((m) => JSON.parse(m.payload)).filter((p) => p.to === buyerUser.email);
+  assert.ok(mails.some((m) => m.template === "eventTicket" && m.args.ticketCode === ticket.body.ticket.code));
+  assert.ok(!mails.some((m) => m.template === "subscriptionActive"), "a ticket is not a membership");
+  // Duplicate webhook is a no-op (same ticket).
+  await req(good.path, "POST", good.body);
+  assert.equal((await req(`/events/${eventId}/ticket`, "GET", undefined, buyer)).body.ticket.code, ticket.body.ticket.code);
+  // Billing history labels the payment with the event.
+  const mine = await req("/payments/mine", "GET", null, buyer);
+  assert.equal(mine.body.items[0].event.title, "Founders Dinner");
+  assert.equal(mine.body.items[0].status, "paid");
+
+  // A paid ticket cannot be self-cancelled (refund path instead).
+  const cancel = await req(`/events/${eventId}/register`, "DELETE", undefined, buyer);
+  assert.equal(cancel.status, 409);
+  assert.equal(cancel.body.error, "paid_ticket_refund_required");
+
+  // Full refund releases the seat; the rival can now buy.
+  const refund = await req(`/admin/payments/${hold.body.paymentAttemptId}/refund`, "POST", {}, adminCookie);
+  assert.equal(refund.status, 200);
+  assert.equal((await Registration.findOne({ where: { EventId: eventId, UserId: buyerUser.id } })).status, "cancelled");
+  const second = await req(`/events/${eventId}/register`, "POST", undefined, rival);
+  assert.equal(second.status, 202);
+
+  // Abandoned hold: maintenance releases it after the window.
+  await Registration.update({ paymentExpiresAt: new Date(Date.now() - 1000) }, { where: { EventId: eventId, status: "pending_payment" } });
+  const stats = await runPaymentMaintenance({ sequelize, Op, User, Plan, Subscription, PaymentAttempt, Registration, Event, notify: async () => {} });
+  assert.ok(stats.releasedHolds >= 1);
+  assert.equal((await PaymentAttempt.findByPk(second.body.paymentAttemptId)).status, "canceled");
+  assert.equal((await req(`/events/${eventId}`, "GET", undefined, rival)).body.item.seatsLeft, 1);
+  // Resuming an expired hold's checkout is refused.
+  assert.equal((await req(`/payments/checkout/${second.body.paymentAttemptId}`, "POST", undefined, rival)).status, 409);
+});

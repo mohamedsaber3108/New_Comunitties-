@@ -12,7 +12,7 @@ process.env.SQLITE_PATH = path.join(process.env.TEMP || "/tmp", "usam-docgen.sql
 const { default: app } = await import("../server/index.js");
 
 const out = process.argv[2] || path.resolve("docs", "API_DOCUMENTATION.md");
-const files = ["index.js", "identity.js", "payments.js", "media.js", "account.js", "mfa.js"];
+const files = ["index.js", "identity.js", "payments.js", "media.js", "account.js", "mfa.js", "realtime.js", "google.js"];
 // The chunk after the path ends at the handler: an inline `async (` / `(req`,
 // or - for routes registered with a named handler - the closing `);`.
 const re = /app\.(get|post|put|patch|delete)\(\s*"(\/[^"]*)"([\s\S]*?)(?=async\s*\(|\(\s*req\s*,\s*res|\(req\s*,|\)\s*;)/g;

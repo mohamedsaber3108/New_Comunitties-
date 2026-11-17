@@ -167,7 +167,7 @@ export function registerMfaRoutes(app, deps) {
   app.use(base, authLimit);
 
   const ready = (res) =>
-    mfaAvailable() ? true : (fail(res, 503, "mfa_unavailable"), false);
+    mfaAvailable() ? true : (fail(res, 409, "mfa_unavailable"), false);
 
   const requiredFor = (u) =>
     config.mfa.requireForAdmins && u.role !== "member";

@@ -134,12 +134,15 @@ test("free event capacity, offer claim idempotency and admin gates", async () =>
   assert.equal(two.body.status, "waitlisted");
   let cancel = await request(`/events/${event.id}/register`, "DELETE");
   assert.equal(cancel.body.status, "cancelled");
-  let promoted = await request(`/events/${event.id}`);
-  const other = await User.findOne({ where: { email: "other@example.test" } });
-  assert.equal(
-    promoted.body.item.Registrations.find((r) => r.UserId === other.id).status,
-    "registered",
-  );
+  // The waitlisted member is promoted; they see it as THEIR registration.
+  let promoted = await request(`/events/${event.id}`, "GET", undefined, cookie2);
+  assert.equal(promoted.body.item.myRegistration.status, "registered");
+  assert.equal(promoted.body.item.registeredCount, 1);
+  // Public event JSON never exposes other attendees or ticket codes.
+  const anon = await fetch(`${base}/api/v1/events/${event.id}`).then((r) => r.text());
+  assert.ok(!/ticketCode|Registrations|UserId/.test(anon), "no attendee data in public event JSON");
+  const list = await fetch(`${base}/api/v1/events`).then((r) => r.text());
+  assert.ok(!/ticketCode|Registrations/.test(list), "no attendee data in the public event list");
   const offer = await Offer.create({
     title: "Development perk",
     quantity: 1,

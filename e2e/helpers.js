@@ -94,6 +94,14 @@ export async function emailToken(to, template) {
 export const makeAdmin = (email, role = "admin") =>
   run(`UPDATE Users SET role = ?, emailVerified = 1 WHERE email = ?`, [role, email]);
 
+// Mark an address verified (what clicking the emailed link does; the link
+// flow itself is covered by journey.spec.js).
+export const verifyEmail = (email) =>
+  run(`UPDATE Users SET emailVerified = 1 WHERE email = ?`, [email]);
+
+// Read-only lookup helper for assertions against the real database.
+export const dbAll = all;
+
 // Always run the UI in English unless a test says otherwise (labels are
 // bilingual; English keeps locators readable).
 export async function useEnglish(context) {

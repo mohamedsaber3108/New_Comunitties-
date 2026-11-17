@@ -37,6 +37,12 @@ export const config = {
   requireEmailVerification: bool(process.env.REQUIRE_EMAIL_VERIFICATION, true),
   trustedOrigins: list(process.env.TRUSTED_ORIGINS),
 
+  // Google sign-in (OIDC). Both values come from a Google Cloud OAuth client.
+  google: {
+    clientId: str(process.env.GOOGLE_CLIENT_ID),
+    clientSecret: str(process.env.GOOGLE_CLIENT_SECRET),
+  },
+
   // Two-factor auth (TOTP). The per-user secret is encrypted at rest with
   // AES-256-GCM using MFA_ENCRYPTION_KEY (64 hex chars = 32 bytes).
   // When REQUIRE_ADMIN_MFA=true, moderator/admin/super_admin accounts without
@@ -143,12 +149,14 @@ export function assertProductionConfig() {
     errors.push("PAYMOB_ENABLED=true requires PAYMOB_HMAC_SECRET (webhook signatures could not be verified).");
   if (config.paymob.enabled && !config.paymob.configured)
     errors.push("PAYMOB_ENABLED=true requires PAYMOB_SECRET_KEY and PAYMOB_PUBLIC_KEY.");
+  if (!!config.google.clientId !== !!config.google.clientSecret)
+    errors.push("Set BOTH GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET (or neither to disable Google sign-in).");
   if (config.mfa.encryptionKey && !/^[0-9a-fA-F]{64}$/.test(config.mfa.encryptionKey))
     errors.push("MFA_ENCRYPTION_KEY must be 64 hex characters (generate with: openssl rand -hex 32).");
   if (config.mfa.requireForAdmins && !config.mfa.encryptionKey)
     errors.push("REQUIRE_ADMIN_MFA=true requires MFA_ENCRYPTION_KEY.");
   if (!config.mfa.encryptionKey)
-    warnings.push("MFA_ENCRYPTION_KEY is not set; two-factor enrolment is unavailable (503). Set it before launch.");
+    warnings.push("MFA_ENCRYPTION_KEY is not set; two-factor enrolment is unavailable (409 mfa_unavailable). Set it before launch.");
   if (config.storage.driver === "local")
     warnings.push("STORAGE_DRIVER is 'local'; uploads will not survive instance replacement. Use s3.");
   if (!config.paymob.enabled)

@@ -172,9 +172,18 @@ test.describe.serial("member journey through the real UI", () => {
   test("account deletion signs the member out and the account can no longer log in", async ({ page }) => {
     await logIn(page, { email, password: newPassword });
     await page.goto("/settings");
-    page.once("dialog", (d) => d.accept("DELETE"));
-    await page.getByRole("button", { name: /delete account/i }).click();
-    await page.waitForLoadState("networkidle");
+    await page.getByRole("button", { name: /^delete account/i }).click();
+    const zone = page.locator("form.danger-zone");
+    const submit = zone.getByRole("button", { name: /permanently delete my account/i });
+    // The final button stays disabled until the password and DELETE are typed.
+    await expect(submit).toBeDisabled();
+    await zone.getByLabel("Password").fill("wrong-password-1");
+    await zone.getByLabel("Type DELETE to confirm").fill("DELETE");
+    await submit.click();
+    await expect(page.getByText("Wrong password")).toBeVisible();
+    await zone.getByLabel("Password").fill(newPassword);
+    await submit.click();
+    await page.waitForURL((u) => u.pathname === "/");
     await page.goto("/login");
     await page.getByLabel("Email address").fill(email);
     await page.getByLabel("Password").fill(newPassword);

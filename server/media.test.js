@@ -38,12 +38,11 @@ async function req(route, method = "GET", body, extraCookie) {
   };
 }
 
-const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const { makePng, makeJpegWithExif, dataUrl } = await import("./test-images.js");
 function pngDataUrl(byteSize) {
-  // Real PNG signature + filler so the magic-byte check passes while the
-  // total size is exactly `byteSize` (size gating is what these tests probe).
-  const buf = Buffer.concat([PNG_SIGNATURE, crypto.randomBytes(Math.max(0, byteSize - PNG_SIGNATURE.length))]);
-  return "data:image/png;base64," + buf.toString("base64");
+  // A structurally valid PNG padded with a private chunk to exactly
+  // `byteSize` bytes (size gating is what these tests probe).
+  return dataUrl("image/png", makePng({ totalBytes: byteSize }));
 }
 
 before(async () => {
@@ -176,4 +175,77 @@ test("one member cannot overwrite or delete another member's avatar", async () =
   await req("/users/me/avatar", "DELETE", null, other.cookie);
   // My avatar is untouched by their deletion.
   assert.equal((await req("/me")).body.user.avatarUrl, mine.body.avatarUrl);
+});
+
+// ---- Post images -------------------------------------------------------
+test("EXIF/GPS and text metadata are stripped before an image is stored", async () => {
+  const { stripMetadata, imageSize } = await import("./storage.js");
+  const jpeg = makeJpegWithExif("GPS:30.0444N,31.2357E");
+  const clean = stripMetadata("image/jpeg", jpeg);
+  assert.ok(jpeg.includes("GPS:30.0444N"));
+  assert.ok(!clean.includes("GPS:30.0444N"), "EXIF segment removed");
+  assert.ok(clean.includes("JFIF"), "JFIF header kept");
+  assert.deepEqual(imageSize("image/jpeg", clean), { width: 640, height: 480 });
+  const png = makePng({ width: 33, height: 21, extraChunks: [["tEXt", Buffer.from("Author\0Secret Person")], ["eXIf", Buffer.from("GPS-in-png")]] });
+  const cleanPng = stripMetadata("image/png", png);
+  assert.ok(!cleanPng.includes("Secret Person") && !cleanPng.includes("GPS-in-png"));
+  assert.deepEqual(imageSize("image/png", cleanPng), { width: 33, height: 21 });
+  // Truncated/garbled structure is refused, not stored.
+  assert.equal(stripMetadata("image/png", png.subarray(0, 40)), null);
+
+  // End to end: the stored file no longer contains the location.
+  const up = await req("/media/images", "POST", { image: dataUrl("image/jpeg", jpeg) });
+  assert.equal(up.status, 201, JSON.stringify(up.body));
+  assert.equal(up.body.width, 640);
+  const stored = Buffer.from(await (await fetch(base + up.body.url)).arrayBuffer());
+  assert.ok(!stored.includes("GPS:30.0444N"));
+});
+
+test("post images: upload, attach to a post (max 4, own only), shown on the post, deleted with it", async () => {
+  await req("/communities/launchpad/join", "POST");
+  const ids = [];
+  for (let i = 0; i < 5; i++) {
+    const r = await req("/media/images", "POST", { image: dataUrl("image/png", makePng({ width: 10 + i, height: 10 })), alt: `pic ${i}` });
+    assert.equal(r.status, 201);
+    assert.match(r.body.url, /^\/media\/posts\//);
+    ids.push(r.body.id);
+  }
+  assert.equal((await req("/posts", "POST", { community: "launchpad", body: "five pics", imageIds: ids })).status, 400, "max 4");
+  // Another member cannot attach my uploads.
+  const other = await req("/auth/signup", "POST", { name: "Thief", email: "thief@example.test", password: "abcdef1234", persona: "launchpad" });
+  await req("/communities/launchpad/join", "POST", undefined, other.cookie);
+  const steal = await req("/posts", "POST", { community: "launchpad", body: "not mine", imageIds: [ids[0]] }, other.cookie);
+  assert.equal(steal.status, 400);
+  assert.equal((await req(`/media/images/${ids[0]}`, "DELETE", null, other.cookie)).status, 404);
+
+  const created = await req("/posts", "POST", { community: "launchpad", body: "three pics", imageIds: [ids[2], ids[0], ids[1]] });
+  assert.equal(created.status, 201);
+  const post = (await req(`/posts/${created.body.id}`)).body.item;
+  assert.deepEqual(post.images.map((i) => i.id), [ids[2], ids[0], ids[1]], "order preserved");
+  assert.equal(post.images[0].width, 12);
+  assert.equal(post.images[1].alt, "pic 0");
+  const feed = await req("/posts?community=launchpad");
+  assert.equal(feed.body.items.find((p) => p.id === created.body.id).images.length, 3);
+  // Already-attached images cannot be reused or deleted directly.
+  assert.equal((await req("/posts", "POST", { community: "launchpad", body: "reuse", imageIds: [ids[0]] })).status, 400);
+  assert.equal((await req(`/media/images/${ids[0]}`, "DELETE")).status, 409);
+  // Unattached upload can be discarded by its owner.
+  assert.equal((await req(`/media/images/${ids[4]}`, "DELETE")).status, 200);
+
+  // Author deletes the post -> files are gone from storage.
+  const url = post.images[0].url;
+  assert.equal((await fetch(base + url)).status, 200);
+  assert.equal((await req(`/posts/${created.body.id}`, "DELETE")).status, 200);
+  assert.equal((await fetch(base + url)).status, 404);
+});
+
+test("housekeeping removes uploads that were never attached to a post", async () => {
+  const { MediaAsset, Session, VerificationToken, OutboxMessage, WebhookEvent, Notification, User } = await import("./db.js");
+  const { runHousekeeping } = await import("./housekeeping.js");
+  const r = await req("/media/images", "POST", { image: dataUrl("image/png", makePng()) });
+  await MediaAsset.update({ createdAt: new Date(Date.now() - 2 * 86400_000) }, { where: { id: r.body.id }, silent: true });
+  const stats = await runHousekeeping({ Session, VerificationToken, OutboxMessage, WebhookEvent, Notification, MediaAsset, User, models: sequelize.models });
+  assert.ok(stats.orphanImages >= 1);
+  assert.equal(await MediaAsset.findByPk(r.body.id), null);
+  assert.equal((await fetch(base + r.body.url)).status, 404);
 });

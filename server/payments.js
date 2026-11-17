@@ -22,6 +22,7 @@ import paymob from "./paymob.js";
 import { config } from "./config.js";
 import { logger } from "./logger.js";
 import { enqueueEmail } from "./jobs.js";
+import crypto from "node:crypto";
 
 // Paymob sends boolean-ish fields inconsistently across endpoints/webhooks
 // (observed as both JSON booleans and the strings "true"/"false").
@@ -36,6 +37,8 @@ export function registerPaymentRoutes(app, deps) {
     Subscription,
     PaymentAttempt,
     WebhookEvent,
+    Registration,
+    Event,
     auth,
     admin,
     fail,
@@ -61,7 +64,9 @@ export function registerPaymentRoutes(app, deps) {
       },
       items: [
         {
-          name: attempt.Subscription?.Plan?.code || "membership",
+          name: attempt.Registration?.Event
+            ? `ticket: ${attempt.Registration.Event.title}`.slice(0, 100)
+            : attempt.Subscription?.Plan?.code || "membership",
           amount_cents: Math.round(attempt.amountEgp * 100),
           quantity: 1,
         },
@@ -82,12 +87,18 @@ export function registerPaymentRoutes(app, deps) {
     try {
       const rows = await PaymentAttempt.findAll({
         where: { UserId: req.user.id },
-        include: [{ model: Subscription, include: [Plan] }],
+        include: [
+          { model: Subscription, include: [Plan] },
+          { model: Registration, include: [{ model: Event, attributes: ["id", "title", "startsAt"] }] },
+        ],
         order: [["createdAt", "DESC"]],
         limit: 50,
       });
       res.json({
         items: rows.map((p) => ({
+          event: p.Registration?.Event
+            ? { id: p.Registration.Event.id, title: p.Registration.Event.title, startsAt: p.Registration.Event.startsAt }
+            : null,
           id: p.id,
           amountEgp: p.amountEgp,
           currency: p.currency,
@@ -121,6 +132,7 @@ export function registerPaymentRoutes(app, deps) {
         include: [
           { model: User, attributes: ["id", "name", "email"] },
           { model: Subscription, include: [Plan] },
+          { model: Registration, include: [{ model: Event, attributes: ["id", "title"] }] },
         ],
         order: [["createdAt", "DESC"]],
         limit: pageSize,
@@ -138,6 +150,7 @@ export function registerPaymentRoutes(app, deps) {
           createdAt: p.createdAt,
           user: p.User,
           plan: p.Subscription?.Plan ? publicPlan(p.Subscription.Plan) : null,
+          event: p.Registration?.Event ? { id: p.Registration.Event.id, title: p.Registration.Event.title } : null,
         })),
         page,
         pageSize,
@@ -167,11 +180,20 @@ export function registerPaymentRoutes(app, deps) {
       try {
         const attempt = await PaymentAttempt.findOne({
           where: { id: req.params.attemptId, UserId: req.user.id },
-          include: [{ model: Subscription, include: [Plan] }],
+          include: [
+            { model: Subscription, include: [Plan] },
+            { model: Registration, include: [Event] },
+          ],
         });
         if (!attempt) return fail(res, 404, "payment_attempt_not_found");
         if (!["created", "pending"].includes(attempt.status))
           return fail(res, 409, "payment_not_pending");
+        if (
+          attempt.RegistrationId &&
+          (attempt.Registration?.status !== "pending_payment" ||
+            !(attempt.Registration.paymentExpiresAt > new Date()))
+        )
+          return fail(res, 409, "seat_hold_expired");
 
         if (!paymob.isConfigured()) {
           // Honest response: we do not fake a checkout.
@@ -232,7 +254,7 @@ export function registerPaymentRoutes(app, deps) {
       const attempt = merchantOrderId
         ? await PaymentAttempt.findOne({
             where: { merchantOrderId },
-            include: [Subscription],
+            include: [Subscription, { model: Registration, include: [Event] }],
           })
         : null;
 
@@ -259,6 +281,11 @@ export function registerPaymentRoutes(app, deps) {
             await Subscription.update(
               { status: "canceled", canceledAt: new Date() },
               { where: { id: attempt.SubscriptionId } },
+            );
+          if (attempt.RegistrationId)
+            await Registration.update(
+              { status: "cancelled" },
+              { where: { id: attempt.RegistrationId } },
             );
         }
         await event.update({ status: "processed", type: "transaction.refunded" });
@@ -296,13 +323,13 @@ export function registerPaymentRoutes(app, deps) {
           return res.json({ ok: true, flagged: "amount_mismatch" });
         }
         await activateFromPayment(
-          { sequelize, Subscription, PaymentAttempt, Plan, Op },
+          deps,
           attempt,
           txn,
         );
         await event.update({ status: "processed" });
-        // Notify the member.
-        try {
+        // Event tickets notify inside confirmTicketFromPayment.
+        if (attempt.SubscriptionId) try {
           const user = await User.findByPk(attempt.UserId);
           const sub = await Subscription.findByPk(attempt.SubscriptionId, {
             include: [Plan],
@@ -331,11 +358,14 @@ export function registerPaymentRoutes(app, deps) {
         await event.update({ status: "processed" });
         try {
           const user = await User.findByPk(attempt.UserId);
-          const sub = await Subscription.findByPk(attempt.SubscriptionId, { include: [Plan] });
+          const sub = attempt.SubscriptionId
+            ? await Subscription.findByPk(attempt.SubscriptionId, { include: [Plan] })
+            : null;
+          const ev = attempt.Registration?.Event;
           if (user)
             await enqueueEmail(user.email, "paymentFailed", {
               name: user.name,
-              planName: sub?.Plan?.nameEn || "membership",
+              planName: ev ? `ticket: ${ev.title}` : sub?.Plan?.nameEn || "membership",
             });
         } catch {}
       }
@@ -406,6 +436,13 @@ export function registerPaymentRoutes(app, deps) {
               { where: { id: attempt.SubscriptionId }, transaction: t },
             );
           }
+          // A fully refunded event ticket releases the seat.
+          if (fullyRefunded && attempt.RegistrationId) {
+            await Registration.update(
+              { status: "cancelled" },
+              { where: { id: attempt.RegistrationId }, transaction: t },
+            );
+          }
         });
         try {
           const member = await User.findByPk(attempt.UserId);
@@ -467,7 +504,7 @@ export function registerPaymentRoutes(app, deps) {
             return fail(res, 409, "amount_mismatch");
           }
           await activateFromPayment(
-            { sequelize, Subscription, PaymentAttempt, Plan, Op },
+            deps,
             attempt,
             txn,
           );
@@ -490,11 +527,9 @@ export function registerPaymentRoutes(app, deps) {
 
 // Activate the subscription linked to a paid attempt. Idempotent: if the
 // attempt is already paid, do nothing.
-async function activateFromPayment(
-  { sequelize, Subscription, PaymentAttempt, Plan, Op },
-  attempt,
-  txn,
-) {
+async function activateFromPayment(deps, attempt, txn) {
+  const { sequelize, Subscription, PaymentAttempt, Op } = deps;
+  if (attempt.RegistrationId) return confirmTicketFromPayment(deps, attempt, txn);
   // Idempotent, and never resurrect a refunded payment.
   if (attempt.status === "paid" || attempt.status === "refunded") return;
   const sub = await Subscription.findByPk(attempt.SubscriptionId);
@@ -529,6 +564,60 @@ async function activateFromPayment(
   });
 }
 
+// Confirm a paid event seat: registration -> registered with a ticket code,
+// attempt -> paid. Idempotent. A payment that lands after the seat hold
+// expired is still honoured (the member paid), and logged for the organiser.
+// Returns the registration on a fresh confirmation, else null.
+async function confirmTicketFromPayment(deps, attempt, txn) {
+  const { sequelize, PaymentAttempt, Registration, Event, User, notify } = deps;
+  if (attempt.status === "paid" || attempt.status === "refunded") return null;
+  let confirmed = null;
+  await sequelize.transaction(async (t) => {
+    const reg = await Registration.findByPk(attempt.RegistrationId, {
+      transaction: t,
+      lock: t.LOCK.UPDATE,
+    });
+    if (!reg) return;
+    if (reg.status !== "pending_payment" && reg.status !== "registered")
+      logger.warn("events.late_payment_honoured", { registrationId: reg.id, was: reg.status });
+    const ticketCode = reg.ticketCode || crypto.randomBytes(10).toString("hex").toUpperCase();
+    await reg.update(
+      { status: "registered", ticketCode, paymentExpiresAt: null },
+      { transaction: t },
+    );
+    await attempt.update(
+      {
+        status: "paid",
+        providerTransactionId: String(txn.id || ""),
+        rawResult: JSON.stringify(txn).slice(0, 8000),
+      },
+      { transaction: t },
+    );
+    confirmed = reg;
+  });
+  if (confirmed) {
+    try {
+      const [user, event] = await Promise.all([
+        User.findByPk(confirmed.UserId),
+        Event.findByPk(confirmed.EventId),
+      ]);
+      if (user && event) {
+        await enqueueEmail(user.email, "eventTicket", {
+          name: user.name,
+          eventTitle: event.title,
+          startsAt: event.startsAt,
+          eventId: event.id,
+          ticketCode: confirmed.ticketCode,
+        });
+        await notify(user.id, "event_ticket", `Your ticket for ${event.title} is confirmed`, `/events/${event.id}`);
+      }
+    } catch (err) {
+      logger.warn("events.ticket_notify_failed", { error: String(err) });
+    }
+  }
+  return confirmed;
+}
+
 // -------------------------------------------------------------------------
 // Scheduled maintenance (called by the in-process scheduler in jobs.js):
 //   1. Reconcile pending attempts older than 10 min with Paymob (recovers a
@@ -539,7 +628,8 @@ async function activateFromPayment(
 // All steps are idempotent and bounded per run.
 // -------------------------------------------------------------------------
 export async function runPaymentMaintenance(d) {
-  const { sequelize, Op, User, Plan, Subscription, PaymentAttempt, notify } = d;
+  const { sequelize, Op, User, Plan, Subscription, PaymentAttempt, Registration, notify } = d;
+  const deps = d;
   const stats = { reconciled: 0, expiredPending: 0, expiredActive: 0, reminders: 0 };
   const now = new Date();
 
@@ -564,12 +654,31 @@ export async function runPaymentMaintenance(d) {
           Number(txn.amount_cents) === Math.round(attempt.amountEgp * 100) &&
           String(txn.currency || "").toUpperCase() === config.paymob.currency
         ) {
-          await activateFromPayment({ sequelize, Subscription, PaymentAttempt, Plan, Op }, attempt, txn);
+          await activateFromPayment(deps, attempt, txn);
           stats.reconciled++;
         }
       } catch (err) {
         logger.warn("payments.maintenance_reconcile_failed", { attemptId: attempt.id, error: String(err) });
       }
+    }
+  }
+
+  // Release paid-event seat holds whose checkout window has passed.
+  stats.releasedHolds = 0;
+  if (Registration) {
+    const holds = await Registration.findAll({
+      where: { status: "pending_payment", paymentExpiresAt: { [Op.lt]: now } },
+      attributes: ["id"],
+      limit: 500,
+    });
+    if (holds.length) {
+      const ids = holds.map((r) => r.id);
+      await Registration.update({ status: "cancelled" }, { where: { id: { [Op.in]: ids }, status: "pending_payment" } });
+      await PaymentAttempt.update(
+        { status: "canceled" },
+        { where: { RegistrationId: { [Op.in]: ids }, status: { [Op.in]: ["created", "pending"] } } },
+      );
+      stats.releasedHolds = ids.length;
     }
   }
 

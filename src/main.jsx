@@ -274,9 +274,35 @@ function AppProvider({ children }) {
       return () => clearTimeout(id);
     }
   }, [toast]);
+  // Realtime: one Server-Sent Events stream per signed-in tab. Events carry
+  // ids only; screens re-fetch through the normal API. `liveTick` bumps on
+  // every event so badges refresh; `onLive` lets a screen react to a kind.
+  const [liveTick, setLiveTick] = useState(0);
+  const [liveListeners] = useState(() => new Set());
+  useEffect(() => {
+    if (PREVIEW_MODE || !user || typeof EventSource === "undefined") return;
+    const es = new EventSource(API + "/stream");
+    const relay = (kind) => (e) => {
+      let data = null;
+      try {
+        data = JSON.parse(e.data);
+      } catch {}
+      setLiveTick((x) => x + 1);
+      for (const fn of liveListeners) fn(kind, data);
+    };
+    for (const kind of ["notification", "message", "read"])
+      es.addEventListener(kind, relay(kind));
+    return () => es.close();
+  }, [user?.id]);
+  const onLive = (fn) => {
+    liveListeners.add(fn);
+    return () => liveListeners.delete(fn);
+  };
   return (
     <AppContext.Provider
       value={{
+        liveTick,
+        onLive,
         lang,
         setLang,
         theme,
@@ -939,7 +965,8 @@ function Loadable({ loading, error, onRetry, children }) {
 function useData(url, refresh = 0, enabled = true) {
   const [data, setData] = useState(null),
     [loading, setLoading] = useState(true),
-    [error, setError] = useState("");
+    [error, setError] = useState(""),
+    [loadedUrl, setLoadedUrl] = useState(null);
   useEffect(() => {
     let active = true;
     if (!enabled || !url) {
@@ -950,10 +977,21 @@ function useData(url, refresh = 0, enabled = true) {
         active = false;
       };
     }
-    setLoading(true);
+    // A refresh of the SAME url keeps showing the current data (no skeleton
+    // flash on every live update); a different url starts clean.
+    const sameUrl = loadedUrl === url && data !== null;
+    if (!sameUrl) {
+      setData(null);
+      setLoading(true);
+    }
     setError("");
+    const target = url;
     api(url)
-      .then((x) => active && setData(x))
+      .then((x) => {
+        if (!active) return;
+        setData(x);
+        setLoadedUrl(target);
+      })
       .catch((e) => active && setError(e.message))
       .finally(() => active && setLoading(false));
     return () => {
@@ -1116,12 +1154,17 @@ function VerifyEmailBanner() {
   );
 }
 function AppShell({ children }) {
-  const { user, lang, setLang, theme, setTheme } = useApp();
+  const { user, lang, setLang, theme, setTheme, liveTick } = useApp();
   const [t, L] = useText();
   const [drawer, setDrawer] = useState(false);
   const navigate = useNavigate(),
     location = useLocation();
   useEffect(() => setDrawer(false), [location.pathname]);
+  // Unread badges, refreshed on live events and on navigation.
+  const [navTick, setNavTick] = useState(0);
+  useEffect(() => setNavTick((x) => x + 1), [location.pathname]);
+  const unread = useData("/me/unread", liveTick + navTick, !PREVIEW_MODE && !!user).data;
+  const badge = { "/messages": unread?.messages, "/notifications": unread?.notifications };
   const nav = [
     ["/home", LayoutDashboard, t.dashboard],
     ["/feed", MessageCircle, t.feed],
@@ -1192,6 +1235,11 @@ function AppShell({ children }) {
           >
             <Icon size={19} strokeWidth={1.8} />
             {label}
+            {badge[to] > 0 && (
+              <span className="unread-badge side-badge" data-testid={`badge-${to.slice(1)}`}>
+                {badge[to] > 99 ? "99+" : badge[to]}
+              </span>
+            )}
           </NavLink>
         ))}
         {["moderator", "admin", "super_admin"].includes(user?.role) && (
@@ -1348,6 +1396,28 @@ function Auth({ mode = "login", prompt, redirect }) {
   useEffect(() => {
     if (user) navigate("/home", { replace: true });
   }, [user]);
+  // Google sign-in is offered only when the server has it configured.
+  const providers = useData("/auth/providers", 0, !PREVIEW_MODE).data;
+  const oauthError = new URLSearchParams(location.search).get("error");
+  useEffect(() => {
+    if (!oauthError) return;
+    setError(
+      {
+        google_cancelled: L("أُلغي تسجيل الدخول عبر Google", "Google sign-in was cancelled"),
+        google_email_unverified: L("بريد Google غير موثّق", "Your Google email is not verified"),
+        mfa_password_login_required: L(
+          "حسابك محمي بالتحقق بخطوتين؛ سجّل الدخول بكلمة المرور والرمز.",
+          "Your account uses two-factor; sign in with your password and code.",
+        ),
+        account_suspended: L("الحساب موقوف", "This account is suspended"),
+        account_deleted: L("الحساب محذوف", "This account was deleted"),
+        registration_unavailable: L("إنشاء الحسابات متوقف مؤقتًا", "Registration is temporarily unavailable"),
+      }[oauthError] || L("تعذّر تسجيل الدخول عبر Google", "Google sign-in failed"),
+    );
+  }, [oauthError]);
+  const googleHref = `/api/v1/auth/google/start?next=${encodeURIComponent(
+    redirect || location.state?.from || "/home",
+  )}`;
   async function submit(e) {
     e.preventDefault();
     setError("");
@@ -1553,6 +1623,23 @@ function Auth({ mode = "login", prompt, redirect }) {
               <ArrowUpLeft size={18} />
             </button>
           </form>
+          {!PREVIEW_MODE && providers?.google && (
+            <>
+              <div className="auth-divider">
+                <span>{L("أو", "or")}</span>
+              </div>
+              {/* A plain link: the server answers with a redirect to Google. */}
+              <a className="button button-outline auth-google" href={googleHref}>
+                <svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true">
+                  <path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.4-.4-3.5z" />
+                  <path fill="#FF3D00" d="m6.3 14.7 6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z" />
+                  <path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-7.9l-6.5 5C9.5 39.6 16.2 44 24 44z" />
+                  <path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z" />
+                </svg>
+                {L("المتابعة باستخدام Google", "Continue with Google")}
+              </a>
+            </>
+          )}
           {!PREVIEW_MODE && !signup && (
             <div className="auth-switch">
               <Link to="/forgot-password">
@@ -1826,6 +1913,27 @@ function Dashboard() {
     </>
   );
 }
+// Images attached to a post. Width/height come from the server so the layout
+// does not jump while images load.
+function PostImages({ images }) {
+  if (!images?.length) return null;
+  return (
+    <div className={`post-images count-${Math.min(images.length, 4)}`}>
+      {images.map((img) => (
+        <a key={img.id} href={img.url} target="_blank" rel="noopener noreferrer">
+          <img
+            src={img.url}
+            alt={img.alt || ""}
+            width={img.width || undefined}
+            height={img.height || undefined}
+            loading="lazy"
+            decoding="async"
+          />
+        </a>
+      ))}
+    </div>
+  );
+}
 function PostList({ posts, onChange }) {
   const { user, setToast } = useApp();
   const [t, L] = useText();
@@ -1878,6 +1986,7 @@ function PostList({ posts, onChange }) {
           <Link to={`/posts/${p.id}`} className="post-body">
             {p.body}
           </Link>
+          <PostImages images={p.images} />
           <div className="post-actions">
             <button
               onClick={() => toggle(p, "reaction")}
@@ -1951,11 +2060,36 @@ function Feed({ savedOnly = false }) {
     [mode, setMode] = useState("all"),
     [body, setBody] = useState(""),
     [refresh, setRefresh] = useState(0),
-    [busy, setBusy] = useState(false);
+    [busy, setBusy] = useState(false),
+    [limit, setLimit] = useState(20);
+  const [older, setOlder] = useState([]),
+    [olderCursor, setOlderCursor] = useState(null);
+  useEffect(() => {
+    setLimit(20);
+    setOlder([]);
+    setOlderCursor(null);
+  }, [community, mode]);
+  // Up to 100 posts: widen the live window. Beyond that: append older pages
+  // through the `before` cursor.
+  async function showMore() {
+    if (limit < 100 && !older.length) return setLimit((x) => Math.min(100, x + 20));
+    const last = (older.length ? older : data.items).at(-1);
+    try {
+      const p = await api(
+        `/posts?${community ? "community=" + community + "&" : ""}${mode === "following" ? "mode=following&" : ""}limit=20&before=${encodeURIComponent(last.createdAt)}`,
+      );
+      setOlder((x) => [...x, ...p.items]);
+      setOlderCursor(p.hasMore ? p.nextBefore : null);
+    } catch (e) {
+      setToast(e.message);
+    }
+  }
+  // "Show more" grows the window instead of stitching pages, so a refresh
+  // after a reaction/comment keeps every visible post consistent.
   const { data, loading, error } = useData(
     savedOnly
       ? "/saved"
-      : `/posts?${community ? "community=" + community + "&" : ""}${mode === "following" ? "mode=following" : ""}`,
+      : `/posts?${community ? "community=" + community + "&" : ""}${mode === "following" ? "mode=following&" : ""}limit=${limit}`,
     refresh,
   );
   const [joined, setJoined] = useState(null);
@@ -1966,15 +2100,52 @@ function Feed({ savedOnly = false }) {
         .catch(() => setJoined(false));
     else setJoined(null);
   }, [community, user, refresh]);
+  // Images are uploaded as soon as they are picked, then referenced by id
+  // when the post is published (unused uploads are cleaned up server-side).
+  const [images, setImages] = useState([]),
+    [uploading, setUploading] = useState(false);
+  async function pickImages(e) {
+    const files = [...(e.target.files || [])].slice(0, 4 - images.length);
+    e.target.value = "";
+    if (!files.length) return;
+    setUploading(true);
+    try {
+      for (const file of files) {
+        if (!file.type.startsWith("image/")) throw new Error("unsupported_file_type");
+        const dataUrl = await resizeToDataUrl(file, 1600);
+        const r = await api("/media/images", {
+          method: "POST",
+          body: JSON.stringify({ image: dataUrl }),
+        });
+        setImages((x) => [...x, r]);
+      }
+    } catch (err) {
+      setToast(
+        {
+          unsupported_file_type: L("نوع الملف غير مدعوم", "Unsupported file type"),
+          file_too_large: L("الصورة كبيرة جدًا", "Image is too large"),
+          invalid_image: L("تعذّر قراءة الصورة", "Could not read the image"),
+          upload_limit_reached: L("وصلت للحد اليومي للرفع", "Daily upload limit reached"),
+        }[err.message] || err.message,
+      );
+    } finally {
+      setUploading(false);
+    }
+  }
+  async function removeImage(img) {
+    setImages((x) => x.filter((i) => i.id !== img.id));
+    api(`/media/images/${img.id}`, { method: "DELETE" }).catch(() => {});
+  }
   async function publish(e) {
     e.preventDefault();
     setBusy(true);
     try {
       await api("/posts", {
         method: "POST",
-        body: JSON.stringify({ body, community }),
+        body: JSON.stringify({ body, community, imageIds: images.map((i) => i.id) }),
       });
       setBody("");
+      setImages([]);
       setRefresh((x) => x + 1);
       setToast(L("تم نشر منشورك", "Your post is published"));
     } catch (e) {
@@ -2062,11 +2233,45 @@ function Feed({ savedOnly = false }) {
                       )}
                     />
                   </div>
+                  {images.length > 0 && (
+                    <div className="compose-images">
+                      {images.map((img) => (
+                        <figure key={img.id}>
+                          <img src={img.url} alt="" />
+                          <button
+                            type="button"
+                            className="icon-btn"
+                            aria-label={L("إزالة الصورة", "Remove image")}
+                            onClick={() => removeImage(img)}
+                          >
+                            <X size={14} />
+                          </button>
+                        </figure>
+                      ))}
+                    </div>
+                  )}
                   <div className="compose-bottom">
                     <span>{body.length}/3000</span>
+                    <label
+                      className={`button button-outline compose-attach ${images.length >= 4 || uploading ? "disabled" : ""}`}
+                    >
+                      <Plus size={15} />
+                      {uploading
+                        ? t.loading
+                        : L(`صور (${images.length}/4)`, `Images (${images.length}/4)`)}
+                      <input
+                        type="file"
+                        accept="image/png,image/jpeg,image/webp,image/gif"
+                        multiple
+                        hidden
+                        disabled={images.length >= 4 || uploading}
+                        onChange={pickImages}
+                        aria-label={L("أضف صورًا", "Add images")}
+                      />
+                    </label>
                     <button
                       className="button button-accent"
-                      disabled={busy || body.trim().length < 2}
+                      disabled={busy || uploading || body.trim().length < 2}
                     >
                       {t.publish}
                       <Send size={16} />
@@ -2091,10 +2296,21 @@ function Feed({ savedOnly = false }) {
           )}
           <Loadable loading={loading} error={error}>
             {data?.items?.length ? (
-              <PostList
-                posts={data.items}
-                onChange={() => setRefresh((x) => x + 1)}
-              />
+              <>
+                <PostList
+                  posts={[...data.items, ...older]}
+                  onChange={() => setRefresh((x) => x + 1)}
+                />
+                {(older.length ? olderCursor : data.hasMore) && (
+                  <button
+                    type="button"
+                    className="button button-outline load-older"
+                    onClick={showMore}
+                  >
+                    {L("عرض منشورات أقدم", "Show older posts")}
+                  </button>
+                )}
+              </>
             ) : (
               <Empty
                 icon={MessageCircle}
@@ -2307,12 +2523,20 @@ function PostDetail() {
 }
 function Directory({ kind }) {
   const [t, L] = useText();
-  const { user, setToast } = useApp();
+  const { user, setToast, lang } = useApp();
   const [refresh, setRefresh] = useState(0);
+  // Members directory: server-side search, persona filter and paging.
+  const [memberQ, setMemberQ] = useState(""),
+    [memberFilter, setMemberFilter] = useState({ q: "", persona: "", page: 1 });
+  const memberUrl = `/members?${new URLSearchParams({
+    ...(memberFilter.q ? { q: memberFilter.q } : {}),
+    ...(memberFilter.persona ? { persona: memberFilter.persona } : {}),
+    page: String(memberFilter.page),
+  })}`;
   const endpoints = {
     events: "/events",
     offers: "/offers",
-    members: "/members",
+    members: memberUrl,
     organizations: "/organizations",
     mentors: "/mentors",
   };
@@ -2399,6 +2623,39 @@ function Directory({ kind }) {
         <Icon size={25} />
         <p>{meta[3]}</p>
       </div>
+      {kind === "members" && (
+        <form
+          className="search-form directory-search"
+          onSubmit={(e) => {
+            e.preventDefault();
+            setMemberFilter((f) => ({ ...f, q: memberQ.trim(), page: 1 }));
+          }}
+        >
+          <Search size={20} />
+          <input
+            value={memberQ}
+            onChange={(e) => setMemberQ(e.target.value)}
+            maxLength="80"
+            aria-label={L("ابحث في الأعضاء", "Search members")}
+            placeholder={L("اسم، مدينة، أو مهارة...", "Name, city or skill...")}
+          />
+          <select
+            aria-label={L("المجتمع", "Community")}
+            value={memberFilter.persona}
+            onChange={(e) =>
+              setMemberFilter((f) => ({ ...f, persona: e.target.value, page: 1 }))
+            }
+          >
+            <option value="">{L("كل المجتمعات", "All communities")}</option>
+            {personaData.map((p) => (
+              <option key={p.slug} value={p.slug}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+          <button className="button button-accent">{t.search}</button>
+        </form>
+      )}
       <Loadable loading={loading} error={error}>
         {data?.items?.length ? (
           <div className="directory-grid">
@@ -2466,12 +2723,28 @@ function Directory({ kind }) {
                       {t.learnMore}
                       <ArrowUpLeft size={15} />
                     </Link>
-                    <button
-                      className="button button-accent small-button"
-                      onClick={() => register(item)}
-                    >
-                      {L("سجّل مجانًا", "Register free")}
-                    </button>
+                    {item.priceType === "paid" ? (
+                      <Link
+                        className="button button-accent small-button"
+                        to={`/events/${item.id}`}
+                      >
+                        {L("تذكرة", "Ticket")} · {formatEgp(item.priceEgp, lang)}
+                      </Link>
+                    ) : item.myRegistration &&
+                      item.myRegistration.status !== "cancelled" ? (
+                      <span className="status-pill active">
+                        {item.myRegistration.status === "waitlisted"
+                          ? L("قائمة الانتظار", "Waitlisted")
+                          : L("مسجّل", "Registered")}
+                      </span>
+                    ) : (
+                      <button
+                        className="button button-accent small-button"
+                        onClick={() => register(item)}
+                      >
+                        {L("سجّل مجانًا", "Register free")}
+                      </button>
+                    )}
                   </div>
                 ) : kind === "members" ? (
                   <Link className="text-link" to={`/members/${item.username}`}>
@@ -2538,15 +2811,41 @@ function EventDetail() {
   const [refresh, setRefresh] = useState(0);
   const { data, loading, error } = useData(`/events/${id}`, refresh);
   const e = data?.item;
-  const own = e?.Registrations?.find(
-    (r) => r.UserId === user?.id && r.status !== "cancelled",
-  );
+  const mine = e?.myRegistration;
+  const own = mine && !["cancelled", "expired"].includes(mine.status) ? mine : null;
+  const paid = e?.priceType === "paid";
+  const [busy, setBusy] = useState(false);
+  const errorText = (code) =>
+    ({
+      event_full: L("اكتملت المقاعد", "This event is sold out"),
+      event_started: L("بدأت الفعالية بالفعل", "This event has already started"),
+      paid_ticket_refund_required: L(
+        "لإلغاء تذكرة مدفوعة تواصل معنا لطلب استرداد المبلغ.",
+        "To cancel a paid ticket, contact us to request a refund.",
+      ),
+      payment_provider_activation_required: L(
+        "الدفع الإلكتروني غير مفعّل حاليًا. لم يتم خصم أي مبلغ.",
+        "Online payment is not active right now. Nothing was charged.",
+      ),
+      payment_initialization_failed: L(
+        "تعذّر فتح صفحة الدفع، حاول مرة أخرى.",
+        "Could not open the payment page, please try again.",
+      ),
+      email_verification_required: L("وثّق بريدك أولًا", "Verify your email first"),
+    })[code] || code;
   async function action() {
     if (!user) return location.assign("/login");
+    setBusy(true);
     try {
+      const cancelling = own && !(paid && own.status === "pending_payment");
       const r = await api(`/events/${id}/register`, {
-        method: own ? "DELETE" : "POST",
+        method: cancelling ? "DELETE" : "POST",
       });
+      if (r.checkoutUrl) {
+        // Paid ticket: the seat is held while the member pays on Paymob.
+        window.location.assign(r.checkoutUrl);
+        return;
+      }
       setToast(
         r.status === "cancelled"
           ? L("تم إلغاء التسجيل", "Registration cancelled")
@@ -2556,7 +2855,20 @@ function EventDetail() {
       );
       setRefresh((x) => x + 1);
     } catch (e) {
-      setToast(e.message);
+      setToast(errorText(e.message));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function releaseHold() {
+    setBusy(true);
+    try {
+      await api(`/events/${id}/register`, { method: "DELETE" });
+      setRefresh((x) => x + 1);
+    } catch (e) {
+      setToast(errorText(e.message));
+    } finally {
+      setBusy(false);
     }
   }
   return (
@@ -2595,28 +2907,57 @@ function EventDetail() {
                 </div>
                 <div>
                   <Users size={19} />
-                  {e.Registrations?.filter((x) => x.status === "registered")
-                    .length || 0}{" "}
-                  / {e.capacity} {L("مقعد", "seats")}
+                  {e.registeredCount || 0} / {e.capacity} {L("مقعد", "seats")}
+                  {e.seatsLeft === 0 && ` · ${L("مكتملة", "sold out")}`}
                 </div>
                 <div>
-                  <Gift size={19} />
-                  {L("تسجيل مجاني", "Free registration")}
+                  {paid ? <CreditCard size={19} /> : <Gift size={19} />}
+                  {paid
+                    ? `${L("تذكرة", "Ticket")} · ${formatEgp(e.priceEgp, lang)}`
+                    : L("تسجيل مجاني", "Free registration")}
                 </div>
               </div>
-              <button className="button button-accent" onClick={action}>
-                {own
-                  ? L("إلغاء تسجيلي", "Cancel registration")
-                  : L("سجّل الآن", "Register now")}
-                <ArrowUpLeft size={18} />
-              </button>
+              {!(paid && own?.status === "registered") && (
+                <button
+                  className="button button-accent"
+                  onClick={action}
+                  disabled={busy || (!own && paid && e.seatsLeft === 0)}
+                >
+                  {busy
+                    ? t.loading
+                    : paid
+                      ? own?.status === "pending_payment"
+                        ? L("أكمل الدفع", "Complete payment")
+                        : `${L("اشترِ تذكرة", "Buy ticket")} · ${formatEgp(e.priceEgp, lang)}`
+                      : own
+                        ? L("إلغاء تسجيلي", "Cancel registration")
+                        : L("سجّل الآن", "Register now")}
+                  <ArrowUpLeft size={18} />
+                </button>
+              )}
+              {paid && own?.status === "pending_payment" && (
+                <button className="button button-outline" onClick={releaseHold} disabled={busy}>
+                  {L("إلغاء الحجز المؤقت", "Release my held seat")}
+                </button>
+              )}
               {own && (
                 <p className="success-note">
                   <CheckCircle2 size={17} />
                   {own.status === "waitlisted"
                     ? L("أنت في قائمة الانتظار", "You are on the waitlist")
-                    : L("أنت مسجّل في الفعالية", "You are registered")}
+                    : own.status === "pending_payment"
+                      ? L(
+                          "مقعدك محجوز مؤقتًا حتى يكتمل الدفع.",
+                          "Your seat is held until payment completes.",
+                        )
+                      : L("أنت مسجّل في الفعالية", "You are registered")}
                 </p>
+              )}
+              {own?.status === "registered" && (
+                <Link className="text-link" to="/my-events">
+                  {L("عرض تذكرتي", "View my ticket")}
+                  <ArrowUpLeft size={15} />
+                </Link>
               )}
             </div>
           ) : (
@@ -3246,7 +3587,7 @@ function EmailVerificationCard() {
 }
 // --- Settings: change password -------------------------------------------
 function ChangePasswordCard() {
-  const { setToast } = useApp();
+  const { setToast, user } = useApp();
   const [, L] = useText();
   const [form, setForm] = useState({ currentPassword: "", newPassword: "", confirm: "" });
   const [busy, setBusy] = useState(false);
@@ -3277,6 +3618,21 @@ function ChangePasswordCard() {
       setBusy(false);
     }
   }
+  if (user && user.hasPassword === false)
+    return (
+      <div className="settings-form security-box">
+        <h2>{L("كلمة المرور", "Password")}</h2>
+        <p>
+          {L(
+            "تسجّل الدخول عبر Google. لإضافة كلمة مرور لحسابك استخدم رابط إعادة التعيين المرسل لبريدك.",
+            "You sign in with Google. To add a password, use the reset link we email you.",
+          )}
+        </p>
+        <Link className="button button-outline" to="/forgot-password">
+          {L("أرسل رابط تعيين كلمة المرور", "Email me a set-password link")}
+        </Link>
+      </div>
+    );
   return (
     <form className="settings-form security-box" onSubmit={submit}>
       <h2>{L("كلمة المرور", "Password")}</h2>
@@ -3611,25 +3967,33 @@ function DataPrivacyCard() {
       setToast(e.message);
     }
   }
-  async function deleteAccount() {
-    const confirm = window.prompt(
-      L(
-        'لحذف حسابك نهائيًا اكتب DELETE',
-        'To permanently delete your account, type DELETE',
-      ),
-    );
-    if (confirm !== "DELETE") return;
+  const { user } = useApp();
+  const [deleting, setDeleting] = useState(false);
+  const [del, setDel] = useState({ confirm: "", password: "", mfaCode: "", deleteContent: false });
+  async function deleteAccount(e) {
+    e.preventDefault();
+    if (del.confirm !== "DELETE") return;
     setBusy(true);
     try {
       await api("/users/me", {
         method: "DELETE",
-        body: JSON.stringify({ confirm: "DELETE" }),
+        body: JSON.stringify(del),
       });
       setToast(L("تم حذف الحساب", "Account deleted"));
       navigate("/");
       location.reload();
     } catch (e) {
-      setToast(e.message);
+      setToast(
+        {
+          invalid_current_password: L("كلمة المرور غير صحيحة", "Wrong password"),
+          invalid_mfa_code: L("رمز التحقق غير صحيح", "Wrong two-factor code"),
+          confirmation_required: L("اكتب DELETE للتأكيد", "Type DELETE to confirm"),
+          reauthentication_required: L(
+            "سجّل الخروج ثم الدخول عبر Google مرة أخرى، ثم احذف الحساب خلال ١٥ دقيقة.",
+            "Sign out and back in with Google, then delete within 15 minutes.",
+          ),
+        }[e.message] || e.message,
+      );
     } finally {
       setBusy(false);
     }
@@ -3650,22 +4014,107 @@ function DataPrivacyCard() {
         </button>
         <button
           className="button button-danger"
-          onClick={deleteAccount}
+          type="button"
+          onClick={() => setDeleting((x) => !x)}
           disabled={busy}
         >
           {L("حذف الحساب", "Delete account")}
           <AlertCircle size={16} />
         </button>
       </div>
+      {deleting && (
+        <form className="danger-zone" onSubmit={deleteAccount}>
+          <p>
+            {L(
+              "سيُحذف ملفك وجلساتك وعلاقاتك فورًا، وتُلغى اشتراكاتك وتسجيلاتك. تبقى سجلات الدفع لأغراض محاسبية.",
+              "Your profile, sessions and connections are removed immediately, and your plans and registrations are cancelled. Payment records are kept for accounting.",
+            )}
+          </p>
+          {user?.hasPassword === false ? (
+            <p className="muted">
+              {L(
+                "للتأكيد، يجب أن تكون قد سجّلت الدخول عبر Google خلال آخر ١٥ دقيقة.",
+                "To confirm, you must have signed in with Google within the last 15 minutes.",
+              )}
+            </p>
+          ) : (
+            <label>
+              {L("كلمة المرور", "Password")}
+              <input
+                type="password"
+                required
+                autoComplete="current-password"
+                value={del.password}
+                onChange={(e) => setDel({ ...del, password: e.target.value })}
+              />
+            </label>
+          )}
+          {user?.mfaEnabled && (
+            <label>
+              {L("رمز التحقق بخطوتين", "Two-factor code")}
+              <input
+                dir="ltr"
+                required
+                autoComplete="one-time-code"
+                value={del.mfaCode}
+                onChange={(e) => setDel({ ...del, mfaCode: e.target.value })}
+              />
+            </label>
+          )}
+          <label className="check-row">
+            <input
+              type="checkbox"
+              checked={del.deleteContent}
+              onChange={(e) => setDel({ ...del, deleteContent: e.target.checked })}
+            />
+            {L(
+              "احذف أيضًا منشوراتي وتعليقاتي وصوري",
+              "Also remove my posts, comments and images",
+            )}
+          </label>
+          <label>
+            {L("اكتب DELETE للتأكيد", "Type DELETE to confirm")}
+            <input
+              dir="ltr"
+              required
+              value={del.confirm}
+              onChange={(e) => setDel({ ...del, confirm: e.target.value })}
+            />
+          </label>
+          <button
+            className="button button-danger"
+            disabled={busy || del.confirm !== "DELETE" || (user?.hasPassword !== false && !del.password)}
+          >
+            {L("احذف حسابي نهائيًا", "Permanently delete my account")}
+          </button>
+        </form>
+      )}
     </div>
   );
 }
 function Notifications() {
   const [t, L] = useText();
-  const { setToast } = useApp();
+  const { setToast, liveTick } = useApp();
   const [refresh, setRefresh] = useState(0);
-  const { data, loading, error } = useData("/notifications", refresh);
-  const unreadCount = data?.items?.filter((n) => !n.readAt).length || 0;
+  const { data, loading, error } = useData("/notifications", refresh + liveTick);
+  const [older, setOlder] = useState([]),
+    [olderCursor, setOlderCursor] = useState(undefined),
+    [loadingOlder, setLoadingOlder] = useState(false);
+  const cursor = olderCursor === undefined ? data?.nextBefore : olderCursor;
+  async function loadMore() {
+    setLoadingOlder(true);
+    try {
+      const p = await api(`/notifications?before=${encodeURIComponent(cursor)}`);
+      setOlder((x) => [...x, ...p.items]);
+      setOlderCursor(p.nextBefore || null);
+    } catch (e) {
+      setToast(e.message);
+    } finally {
+      setLoadingOlder(false);
+    }
+  }
+  const unreadCount =
+    data?.unreadCount ?? (data?.items?.filter((n) => !n.readAt).length || 0);
   async function markAllRead() {
     try {
       await api("/notifications/read-all", { method: "PATCH" });
@@ -3696,7 +4145,7 @@ function Notifications() {
         <Loadable loading={loading} error={error}>
           {data?.items?.length ? (
             <div className="notifications-list">
-              {data.items.map((n) => (
+              {[...data.items, ...older.filter((o) => !data.items.some((n) => n.id === o.id))].map((n) => (
                 <Link
                   key={n.id}
                   className={`notification ${n.readAt ? "" : "unread"}`}
@@ -3718,6 +4167,16 @@ function Notifications() {
                   <ArrowUpLeft size={18} />
                 </Link>
               ))}
+              {cursor && (
+                <button
+                  type="button"
+                  className="button button-outline load-older"
+                  onClick={loadMore}
+                  disabled={loadingOlder}
+                >
+                  {L("عرض المزيد", "Show more")}
+                </button>
+              )}
             </div>
           ) : (
             <Empty
@@ -4373,13 +4832,85 @@ function RoomApplicationStatus({ application, onChanged }) {
 // Add/remove members for an organization the current user owns or administers
 // (wires POST /organizations/:id/team and PATCH .../team/:memberId, which
 // previously had models + API but no UI control).
+function OrganizationAnalytics({ orgId }) {
+  const [, L] = useText();
+  const { data, loading, error } = useData(`/organizations/${orgId}/analytics`);
+  const max = Math.max(1, ...(data?.team?.growthByMonth || []).map((m) => m.joined));
+  return (
+    <Loadable loading={loading} error={error}>
+      {data && (
+        <div className="org-analytics">
+          <div className="stat-grid">
+            {[
+              [data.team.size, L("حجم الفريق", "Team size"), Users],
+              [data.team.joinedLast30Days, L("انضموا آخر ٣٠ يومًا", "Joined in 30 days"), Plus],
+              [data.engagementLast30Days.posts, L("منشورات ٣٠ يومًا", "Posts (30 days)"), MessageCircle],
+              [data.engagementLast30Days.activePosters, L("أعضاء نشطون", "Active posters"), UserRound],
+              [data.engagementLast30Days.eventRegistrations, L("تسجيلات فعاليات", "Event registrations"), CalendarDays],
+              [data.engagementLast30Days.eventCheckIns, L("حضور فعلي", "Check-ins"), BadgeCheck],
+            ].map(([value, label, Icon]) => (
+              <div className="stat-card" key={label}>
+                <Icon size={20} />
+                <strong>{value}</strong>
+                <span>{label}</span>
+              </div>
+            ))}
+          </div>
+          <h3>{L("نمو الفريق (٦ أشهر)", "Team growth (6 months)")}</h3>
+          <div className="org-bars" role="list">
+            {data.team.growthByMonth.map((m) => (
+              <div key={m.month} role="listitem" className="org-bar" title={`${m.month}: ${m.joined}`}>
+                <span style={{ blockSize: `${(m.joined / max) * 100}%` }} />
+                <small>{m.month.slice(5)}</small>
+                <b>{m.joined}</b>
+              </div>
+            ))}
+          </div>
+          <p className="muted">
+            {L("المجتمعات", "Communities")}:{" "}
+            {Object.entries(data.communities)
+              .map(([k, v]) => `${personaData.find((p) => p.slug === k)?.name || k} ${v}`)
+              .join(" · ") || "—"}
+          </p>
+        </div>
+      )}
+    </Loadable>
+  );
+}
 function OrganizationTeamCard({ org, onChanged }) {
   const [, L] = useText();
-  const { setToast } = useApp();
+  const { setToast, user } = useApp();
   const [username, setUsername] = useState("");
   const [role, setRole] = useState("member");
   const [busy, setBusy] = useState(false);
+  const [showStats, setShowStats] = useState(false);
   const active = (org.OrganizationMembers || []).filter((m) => m.status !== "removed");
+  const myRole = org.myRole || "owner";
+  const isOwner = myRole === "owner" || ["admin", "super_admin"].includes(user?.role);
+  const canManage = isOwner || myRole === "admin";
+  const myRow = active.find((m) => m.UserId === user?.id || m.User?.id === user?.id);
+  async function changeRole(memberId, next) {
+    try {
+      await api(`/organizations/${org.id}/team/${memberId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ role: next }),
+      });
+      setToast(L("تم تحديث الدور", "Role updated"));
+      onChanged();
+    } catch (e) {
+      setToast(e.message);
+    }
+  }
+  async function leave() {
+    if (!myRow || !window.confirm(L("مغادرة هذا الفريق؟", "Leave this team?"))) return;
+    try {
+      await api(`/organizations/${org.id}/team/${myRow.id}`, { method: "PATCH", body: "{}" });
+      setToast(L("غادرت الفريق", "You left the team"));
+      onChanged();
+    } catch (e) {
+      setToast(e.message);
+    }
+  }
   async function add(e) {
     e.preventDefault();
     if (!username.trim()) return;
@@ -4406,7 +4937,7 @@ function OrganizationTeamCard({ org, onChanged }) {
   async function remove(memberId) {
     if (!window.confirm(L("إزالة هذا العضو من الفريق؟", "Remove this member from the team?"))) return;
     try {
-      await api(`/organizations/${org.id}/team/${memberId}`, { method: "PATCH" });
+      await api(`/organizations/${org.id}/team/${memberId}`, { method: "PATCH", body: "{}" });
       setToast(L("تمت إزالة العضو", "Member removed"));
       onChanged();
     } catch (e) {
@@ -4418,7 +4949,9 @@ function OrganizationTeamCard({ org, onChanged }) {
       <div>
         <h2>{org.name}</h2>
         <p className="muted">
-          {L("حالة المؤسسة", "Organization status")}: {org.status}
+          {L("حالة المؤسسة", "Organization status")}: {org.status} ·{" "}
+          {L("دورك", "Your role")}:{" "}
+          {{ owner: L("مالك", "Owner"), admin: L("مسؤول", "Admin"), member: L("عضو", "Member") }[myRole] || myRole}
         </p>
         <div className="sessions-list">
           {active.length ? (
@@ -4427,10 +4960,19 @@ function OrganizationTeamCard({ org, onChanged }) {
                 <div>
                   <strong>{m.User?.name}</strong>
                   <small>
-                    @{m.User?.username} · {m.role}
+                    @{m.User?.username} ·{" "}
+                    {m.role === "admin" ? L("مسؤول", "Admin") : L("عضو", "Member")}
                   </small>
                 </div>
-                {m.role !== "owner" && (
+                {isOwner && m.role !== "owner" && (
+                  <button
+                    className="button button-outline"
+                    onClick={() => changeRole(m.id, m.role === "admin" ? "member" : "admin")}
+                  >
+                    {m.role === "admin" ? L("اجعله عضوًا", "Make member") : L("اجعله مسؤولًا", "Make admin")}
+                  </button>
+                )}
+                {canManage && m.role !== "owner" && (isOwner || m.role !== "admin") && (
                   <button className="button button-outline" onClick={() => remove(m.id)}>
                     {L("إزالة", "Remove")}
                   </button>
@@ -4441,8 +4983,22 @@ function OrganizationTeamCard({ org, onChanged }) {
             <p className="muted">{L("لا يوجد أعضاء فريق بعد", "No team members yet")}</p>
           )}
         </div>
+        {myRow && myRole !== "owner" && (
+          <button className="button button-outline danger" onClick={leave}>
+            {L("مغادرة الفريق", "Leave team")}
+          </button>
+        )}
+        {canManage && org.status === "approved" && (
+          <>
+            <button className="button button-outline" onClick={() => setShowStats((x) => !x)}>
+              <ChartNoAxesCombined size={16} />
+              {showStats ? L("إخفاء الإحصاءات", "Hide analytics") : L("إحصاءات الفريق", "Team analytics")}
+            </button>
+            {showStats && <OrganizationAnalytics orgId={org.id} />}
+          </>
+        )}
       </div>
-      {org.status === "approved" && (
+      {canManage && org.status === "approved" && (
         <form className="settings-form" onSubmit={add}>
           <h2>{L("إضافة عضو للفريق", "Add a team member")}</h2>
           <div className="form-columns">
@@ -4454,7 +5010,7 @@ function OrganizationTeamCard({ org, onChanged }) {
               {L("الدور", "Role")}
               <select value={role} onChange={(e) => setRole(e.target.value)}>
                 <option value="member">{L("عضو", "Member")}</option>
-                <option value="admin">{L("مسؤول", "Admin")}</option>
+                {isOwner && <option value="admin">{L("مسؤول", "Admin")}</option>}
               </select>
             </label>
           </div>
@@ -6076,9 +6632,24 @@ function AdminPage() {
   async function create(e, kind) {
     e.preventDefault();
     try {
+      // datetime-local has no zone; convert in the browser so the server
+      // stores the instant the admin meant (servers run in UTC).
+      const toIso = (v) => (v ? new Date(v).toISOString() : v);
+      const payload = {
+        ...form,
+        startsAt: toIso(form.startsAt),
+        deadline: toIso(form.deadline),
+        ...(kind === "events"
+          ? {
+              priceType: form.priceType === "paid" ? "paid" : "free",
+              priceEgp: form.priceType === "paid" ? Number(form.priceEgp) : undefined,
+              capacity: Number(form.capacity),
+            }
+          : {}),
+      };
       await api(`/admin/${kind}`, {
         method: "POST",
-        body: JSON.stringify(form),
+        body: JSON.stringify(payload),
       });
       setRefresh((x) => x + 1);
       setForm({ ...form, title: "", description: "" });
@@ -6388,7 +6959,7 @@ function AdminPage() {
         >
           <h2>
             {tab === "events"
-              ? L("انشر فعالية مجانية", "Publish a free event")
+              ? L("انشر فعالية", "Publish an event")
               : tab === "challenges"
                 ? L("انشر تحديًا", "Publish a challenge")
                 : L("انشر ميزة", "Publish a perk")}
@@ -6486,6 +7057,29 @@ function AdminPage() {
                   }
                 />
               </label>
+              <label>
+                {L("نوع التسجيل", "Registration type")}
+                <select
+                  value={form.priceType || "free"}
+                  onChange={(e) => setForm({ ...form, priceType: e.target.value })}
+                >
+                  <option value="free">{L("مجاني", "Free")}</option>
+                  <option value="paid">{L("مدفوع (تذكرة)", "Paid ticket")}</option>
+                </select>
+              </label>
+              {form.priceType === "paid" && (
+                <label>
+                  {L("سعر التذكرة (ج.م)", "Ticket price (EGP)")}
+                  <input
+                    type="number"
+                    min="1"
+                    step="1"
+                    required
+                    value={form.priceEgp || ""}
+                    onChange={(e) => setForm({ ...form, priceEgp: e.target.value })}
+                  />
+                </label>
+              )}
             </>
           ) : (
             <>
@@ -7515,12 +8109,46 @@ function MessagesPage() {
   const { id } = useParams(),
     { user, setToast } = useApp();
   const [t, L] = useText();
+  const { onLive } = useApp();
   const [refresh, setRefresh] = useState(0),
-    [body, setBody] = useState("");
+    [body, setBody] = useState(""),
+    [sending, setSending] = useState(false),
+    [older, setOlder] = useState([]),
+    [olderCursor, setOlderCursor] = useState(undefined),
+    [loadingOlder, setLoadingOlder] = useState(false);
   const list = useData("/messages", refresh),
-    thread = useData(id ? `/messages/${id}` : "/messages", refresh);
+    thread = useData(id ? `/messages/${id}` : null, refresh);
+  // Live: refresh the list on any message/read event, and the open thread
+  // when the event belongs to it.
+  useEffect(
+    () =>
+      onLive((kind, data) => {
+        if (kind === "message" || kind === "read") setRefresh((x) => x + 1);
+      }),
+    [id],
+  );
+  useEffect(() => {
+    setOlder([]);
+    setOlderCursor(undefined);
+  }, [id]);
+  const cursor = olderCursor === undefined ? thread.data?.nextBefore : olderCursor;
+  async function loadOlder() {
+    if (!cursor) return;
+    setLoadingOlder(true);
+    try {
+      const p = await api(`/messages/${id}?before=${encodeURIComponent(cursor)}`);
+      setOlder((x) => [...p.items, ...x]);
+      setOlderCursor(p.nextBefore || null);
+    } catch (e) {
+      setToast(e.message);
+    } finally {
+      setLoadingOlder(false);
+    }
+  }
   async function send(e) {
     e.preventDefault();
+    if (sending) return;
+    setSending(true);
     try {
       await api(`/messages/${id}`, {
         method: "POST",
@@ -7529,12 +8157,29 @@ function MessagesPage() {
       setBody("");
       setRefresh((x) => x + 1);
     } catch (e) {
-      setToast(e.message);
+      setToast(
+        {
+          messaging_unavailable: L("المراسلة غير متاحة مع هذا العضو", "Messaging is not available with this member"),
+          invalid_message: L("اكتب رسالة أولًا", "Write a message first"),
+          email_verification_required: L("وثّق بريدك لإرسال الرسائل", "Verify your email to send messages"),
+        }[e.message] || e.message,
+      );
+    } finally {
+      setSending(false);
     }
   }
+  const unreadHere = list.data?.items?.find((c) => c.id === id)?.unread || 0;
   useEffect(() => {
-    if (id) api(`/messages/${id}/read`, { method: "PATCH" }).catch(() => {});
-  }, [id, refresh]);
+    if (id)
+      api(`/messages/${id}/read`, { method: "PATCH" }).catch(() => {});
+  }, [id, unreadHere]);
+  const shown = [...older, ...(thread.data?.items || [])];
+  const scrollRef = React.useRef(null);
+  const lastId = thread.data?.items?.at(-1)?.id;
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [lastId]);
   return (
     <>
       <AppHeading
@@ -7559,9 +8204,24 @@ function MessagesPage() {
                   <span className="avatar">{c.other?.name?.charAt(0)}</span>
                   <span>
                     <strong>{c.other?.name}</strong>
+                    {c.lastMessage && (
+                      <small className="message-preview">
+                        {c.lastMessage.mine ? L("أنت: ", "You: ") : ""}
+                        {c.lastMessage.body}
+                      </small>
+                    )}
                     <small>{new Date(c.updatedAt).toLocaleString()}</small>
                   </span>
-                  <ArrowUpLeft size={15} />
+                  {c.unread > 0 ? (
+                    <span
+                      className="unread-badge"
+                      aria-label={L(`${c.unread} غير مقروءة`, `${c.unread} unread`)}
+                    >
+                      {c.unread}
+                    </span>
+                  ) : (
+                    <ArrowUpLeft size={15} />
+                  )}
                 </Link>
               ))
             ) : (
@@ -7596,9 +8256,19 @@ function MessagesPage() {
                       <RefreshCcw size={17} />
                     </button>
                   </header>
-                  <div className="message-scroll">
-                    {thread.data.items.length ? (
-                      thread.data.items.map((m) => (
+                  <div className="message-scroll" ref={scrollRef}>
+                    {cursor && (
+                      <button
+                        type="button"
+                        className="button button-outline load-older"
+                        onClick={loadOlder}
+                        disabled={loadingOlder}
+                      >
+                        {L("تحميل رسائل أقدم", "Load older messages")}
+                      </button>
+                    )}
+                    {shown.length ? (
+                      shown.map((m) => (
                         <div
                           key={m.id}
                           className={`message-bubble ${m.SenderId === user.id ? "mine" : ""}`}
@@ -7629,7 +8299,7 @@ function MessagesPage() {
                       onChange={(e) => setBody(e.target.value)}
                       placeholder={L("اكتب رسالتك...", "Write your message...")}
                     />
-                    <button className="button button-accent">
+                    <button className="button button-accent" disabled={sending}>
                       {L("إرسال", "Send")}
                       <Send size={17} />
                     </button>
@@ -8428,7 +9098,9 @@ function MyEventsPage() {
                       {new Date(x.Event?.startsAt).toLocaleString()} ·{" "}
                       {x.status === "waitlisted"
                         ? L("قائمة انتظار", "Waitlist")
-                        : L("مسجّل", "Registered")}
+                        : x.status === "pending_payment"
+                          ? L("بانتظار الدفع", "Awaiting payment")
+                          : L("مسجّل", "Registered")}
                     </small>
                   </Link>
                   {x.status === "registered" && (
@@ -9316,7 +9988,15 @@ function BillingPage() {
               <div className="session-row" key={p.id}>
                 <div>
                   <strong>
-                    {p.plan ? (lang === "ar" ? p.plan.nameAr : p.plan.nameEn) : "—"}{" "}
+                    {p.plan ? (
+                      lang === "ar" ? p.plan.nameAr : p.plan.nameEn
+                    ) : p.event ? (
+                      <Link to={`/events/${p.event.id}`}>
+                        {L("تذكرة", "Ticket")}: {p.event.title}
+                      </Link>
+                    ) : (
+                      "—"
+                    )}{" "}
                     · {formatEgp(p.amountEgp, lang)}
                   </strong>
                   <small>

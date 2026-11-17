@@ -16,7 +16,7 @@ const dropTestDb = await prepareTestDatabase();
 process.env.REQUIRE_EMAIL_VERIFICATION = "false";
 process.env.WORKER_ENABLED = "false";
 process.env.RATE_LIMIT_DISABLED = "true";
-// Enable MFA so the fuzz sweep exercises the real handlers, not the 503 stub.
+// Enable MFA so the fuzz sweep exercises the real handlers, not the "unavailable" stub.
 process.env.MFA_ENCRYPTION_KEY = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "usam-robust-"));
 process.env.SQLITE_PATH = path.join(temp, "db.sqlite");
@@ -130,7 +130,20 @@ test("GET endpoints with junk path parameters and query strings never 5xx", asyn
   for (const { method, path: p } of discoverRoutes()) {
     if (method !== "GET") continue;
     for (const q of junk) {
-      const r = await fetch(base + fill(p) + q, { headers: { Cookie: cookie } });
+      // redirect:"manual" - the OAuth routes answer with redirects to Google /
+      // the frontend, which are correct responses, not something to follow.
+      // The SSE stream never ends by design, so only its status is read.
+      const ctrl = new AbortController();
+      const r = await fetch(base + fill(p) + q, {
+        headers: { Cookie: cookie },
+        redirect: "manual",
+        signal: ctrl.signal,
+      });
+      if (p === "/api/v1/stream") {
+        assert.equal(r.status, 200);
+        ctrl.abort();
+        continue;
+      }
       // /export streams a file and /health is covered elsewhere; both must still not 5xx.
       if (r.status >= 500) failures.push(`GET ${p}${q} -> ${r.status}`);
     }

@@ -132,6 +132,7 @@ export const User = sequelize.define("User", {
   },
   isDeleted: { type: DataTypes.BOOLEAN, defaultValue: false },
   deletedAt: { type: DataTypes.DATE },
+  purgedAt: { type: DataTypes.DATE },
   suspendedAt: { type: DataTypes.DATE },
   suspensionReason: { type: DataTypes.STRING(400), defaultValue: "" },
   // --- Security tracking -----------------------------------------------
@@ -232,6 +233,24 @@ export const Post = sequelize.define("Post", {
     defaultValue: "published",
   },
 });
+// Uploaded media owned by a member (post images). Unattached uploads
+// (PostId null) older than a day are removed by housekeeping.
+export const MediaAsset = sequelize.define(
+  "MediaAsset",
+  {
+    ...common,
+    purpose: { type: DataTypes.ENUM("post_image"), allowNull: false, defaultValue: "post_image" },
+    storageKey: { type: DataTypes.STRING(300), allowNull: false },
+    url: { type: DataTypes.STRING(500), allowNull: false },
+    mimeType: { type: DataTypes.STRING(60), allowNull: false },
+    sizeBytes: { type: DataTypes.INTEGER, allowNull: false },
+    width: DataTypes.INTEGER,
+    height: DataTypes.INTEGER,
+    position: { type: DataTypes.INTEGER, defaultValue: 0 },
+    alt: { type: DataTypes.STRING(300), defaultValue: "" },
+  },
+  { indexes: [{ fields: ["PostId"] }, { fields: ["UserId", "createdAt"] }] },
+);
 export const Comment = sequelize.define("Comment", {
   ...common,
   body: { type: DataTypes.TEXT, allowNull: false },
@@ -260,17 +279,22 @@ export const Event = sequelize.define("Event", {
     defaultValue: "draft",
   },
   priceType: { type: DataTypes.ENUM("free", "paid"), defaultValue: "free" },
+  // Whole EGP; only meaningful when priceType = "paid".
+  priceEgp: { type: DataTypes.INTEGER, defaultValue: 0 },
 });
 export const Registration = sequelize.define(
   "Registration",
   {
     ...common,
+    // pending_payment: a paid seat held for a short window while the member
+    // completes the hosted checkout (released by payment maintenance).
     status: {
-      type: DataTypes.ENUM("registered", "waitlisted", "cancelled"),
+      type: DataTypes.ENUM("registered", "waitlisted", "cancelled", "pending_payment"),
       defaultValue: "registered",
     },
     ticketCode: { type: DataTypes.STRING(32), unique: true },
     checkedInAt: DataTypes.DATE,
+    paymentExpiresAt: DataTypes.DATE,
   },
   { indexes: [{ unique: true, fields: ["UserId", "EventId"] }] },
 );
@@ -464,6 +488,9 @@ export const PaymentAttempt = sequelize.define("PaymentAttempt", {
   // refund webhook for a refund WE issued is not double-counted.
   refundTransactionIds: { type: DataTypes.TEXT, defaultValue: "[]" },
   rawResult: { type: DataTypes.TEXT, defaultValue: "" },
+  // What is being paid for: a Subscription (membership) OR a Registration
+  // (paid event ticket). Exactly one is set.
+  RegistrationId: { type: DataTypes.UUID },
 });
 // -------------------------------------------------------------------------
 // WebhookEvent: idempotent ledger of inbound provider callbacks. A unique
@@ -735,6 +762,14 @@ User.hasMany(PaymentAttempt);
 PaymentAttempt.belongsTo(User);
 Subscription.hasMany(PaymentAttempt);
 PaymentAttempt.belongsTo(Subscription);
+// constraints:false keeps the column identical whether it came from the
+// baseline sync or from migration 0004 (which adds it without an FK).
+User.hasMany(MediaAsset);
+MediaAsset.belongsTo(User);
+Post.hasMany(MediaAsset, { as: "images" });
+MediaAsset.belongsTo(Post);
+Registration.hasMany(PaymentAttempt, { foreignKey: "RegistrationId", constraints: false });
+PaymentAttempt.belongsTo(Registration, { foreignKey: "RegistrationId", constraints: false });
 Community.hasMany(Group);
 Group.belongsTo(Community);
 User.belongsToMany(Group, { through: GroupMembership });
