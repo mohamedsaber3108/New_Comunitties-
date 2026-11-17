@@ -127,12 +127,20 @@ export function assertProductionConfig() {
     errors.push("DB_DIALECT must be 'postgres' in production (SQLite is for dev/test only).");
   if (dialect !== "sqlite" && !process.env.DATABASE_URL && !process.env.DB_HOST)
     errors.push("Set DATABASE_URL (or DB_HOST/DB_NAME/DB_USER/DB_PASSWORD).");
+  // STAGING_INSECURE_HTTP=true: an explicit, temporary staging switch for a
+  // server that has no domain/TLS yet (plain http://<ip>). It downgrades ONLY
+  // the three HTTPS checks below to warnings; every other check still applies.
+  // Never set it on the real public site - sessions travel unencrypted.
+  const httpStaging = process.env.STAGING_INSECURE_HTTP === "true";
+  const httpsIssue = (msg) => (httpStaging ? warnings : errors).push(msg);
+  if (httpStaging)
+    warnings.push("STAGING_INSECURE_HTTP=true: running WITHOUT HTTPS. Staging only - add a domain + TLS and remove this before launch.");
   if (!/^https:\/\//.test(config.appOrigin))
-    errors.push("APP_ORIGIN must be the public HTTPS origin (used for CSRF checks and email links).");
+    httpsIssue("APP_ORIGIN must be the public HTTPS origin (used for CSRF checks and email links).");
   if (!/^https:\/\//.test(config.frontendUrl))
-    errors.push("FRONTEND_URL must be HTTPS (it is embedded in verification/reset emails).");
+    httpsIssue("FRONTEND_URL must be HTTPS (it is embedded in verification/reset emails).");
   if (!config.cookieSecure)
-    errors.push("COOKIE_SECURE must be true in production (session cookie would travel over HTTP).");
+    httpsIssue("COOKIE_SECURE must be true in production (session cookie would travel over HTTP).");
   if (process.env.RATE_LIMIT_DISABLED === "true")
     errors.push("RATE_LIMIT_DISABLED=true is not allowed in production.");
   // If verification is required but mail can't be delivered, NOBODY could ever

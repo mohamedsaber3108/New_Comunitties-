@@ -14,7 +14,7 @@ async function freshConfig() {
 for (const k of [
   "RATE_LIMIT_DISABLED", "PAYMOB_ENABLED", "PAYMOB_HMAC_SECRET", "PAYMOB_SECRET_KEY", "PAYMOB_PUBLIC_KEY",
   "EMAIL_PROVIDER", "EMAIL_FROM", "REQUIRE_EMAIL_VERIFICATION", "REGISTRATION_ENABLED", "COOKIE_SECURE",
-  "STORAGE_DRIVER", "S3_BUCKET", "SMTP_HOST", "DATABASE_URL", "DB_DIALECT", "DB_HOST", "APP_ORIGIN", "FRONTEND_URL",
+  "STORAGE_DRIVER", "S3_BUCKET", "SMTP_HOST", "DATABASE_URL", "DB_DIALECT", "DB_HOST", "APP_ORIGIN", "FRONTEND_URL", "STAGING_INSECURE_HTTP",
 ]) delete process.env[k];
 const SNAPSHOT = { ...process.env };
 function reset() {
@@ -112,5 +112,35 @@ test("non-production environments are never blocked", async () => {
   process.env.NODE_ENV = "development";
   const { assertProductionConfig } = await freshConfig();
   assert.deepEqual(assertProductionConfig(), { ok: true, warnings: [] });
+  reset();
+});
+
+test("STAGING_INSECURE_HTTP relaxes ONLY the HTTPS checks, and only when set", async () => {
+  const base = {
+    NODE_ENV: "production",
+    DB_DIALECT: "postgres",
+    DATABASE_URL: "postgres://u:p@host/db",
+    APP_ORIGIN: "http://13.48.0.1:8080",
+    FRONTEND_URL: "http://13.48.0.1:8080",
+    COOKIE_SECURE: "false",
+    EMAIL_PROVIDER: "console",
+    REQUIRE_EMAIL_VERIFICATION: "false",
+  };
+  reset();
+  Object.assign(process.env, base);
+  let check = (await freshConfig()).assertProductionConfig();
+  assert.equal(check.ok, false, "plain HTTP is refused by default");
+  reset();
+  Object.assign(process.env, base, { STAGING_INSECURE_HTTP: "true" });
+  check = (await freshConfig()).assertProductionConfig();
+  assert.equal(check.ok, true, JSON.stringify(check.errors));
+  assert.match(check.warnings.join(" | "), /WITHOUT HTTPS/);
+  // Everything else is still enforced: SQLite, disabled rate limits, etc.
+  reset();
+  Object.assign(process.env, base, { STAGING_INSECURE_HTTP: "true", DB_DIALECT: "sqlite", RATE_LIMIT_DISABLED: "true" });
+  check = (await freshConfig()).assertProductionConfig();
+  assert.equal(check.ok, false);
+  assert.match(check.errors.join(" | "), /DB_DIALECT/);
+  assert.match(check.errors.join(" | "), /RATE_LIMIT_DISABLED/);
   reset();
 });
