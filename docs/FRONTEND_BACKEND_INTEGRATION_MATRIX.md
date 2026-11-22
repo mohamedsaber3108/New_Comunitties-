@@ -81,6 +81,8 @@ Symbols: ✔ done - ◐ partial (see note) - ✘ not done
 | 44 | Google sign-in | Login / signup | `/auth/providers`, `/auth/google/start`, `/auth/google/callback` | state + PKCE + nonce; RS256 ID token verified; never bypasses MFA | ✔ | ✔ | A (**M** Google) | ext (Google client) | no |
 | 45 | Org team admins, roles, leaving, team analytics | Participation -> Organization teams | `/organizations/mine`, `/organizations/:id/team*`, `/organizations/:id/analytics` | owner-only admin grants; managers-only analytics | ✔ | ✔ | A, B | ✔ | no |
 | 46 | Account deletion with re-authentication, 30-day purge | Settings -> Data & privacy | `DELETE /users/me` | password (or recent Google sign-in) + MFA code; optional content removal | ✔ | ✔ | A, B | ✔ | no |
+| 47 | Promo codes (percent/fixed, plan/event scope, limits, dates) | Checkout, event page, Admin -> Promo codes | `/coupons/quote`, `/admin/coupons*`, `couponCode` on `/subscriptions` + event register | server-side price; row-locked limits; abandoned checkouts release uses; terms lock once used | ✔ | ✔ | A (incl. concurrency on PostgreSQL), B | 100% codes work now; partial needs Paymob | no |
+| 48 | Platform analytics, segments, funnel, CSV | Admin -> Analytics | `GET /admin/analytics?days=7|30|90` | admin only; real counts | ✔ | ✔ | A, B | ✔ | no |
 | **Static / content** |
 | 39 | Home, explore, programs, rooms, partners catalogs, resources, FAQ, legal, 404 | public routes | (static content in `src/*.js`) | - | ✔ | ✔ | B (overflow, 404) | n/a | no |
 

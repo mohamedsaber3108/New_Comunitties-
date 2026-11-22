@@ -5028,3 +5028,32 @@ strong {
   justify-content: center;
   gap: 10px;
 }
+/* Promo codes */
+.coupon-field { display: grid; gap: 6px; margin: 12px 0; }
+.coupon-row { display: flex; gap: 8px; margin-top: 6px; }
+.coupon-row input { flex: 1; min-width: 0; text-transform: uppercase; }
+.coupon-applied {
+  display: flex; align-items: center; gap: 8px; margin: 12px 0; padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--line));
+  border-radius: 12px; background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+}
+.coupon-applied span { flex: 1; }
+.coupon-plans { border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; display: flex; flex-wrap: wrap; gap: 6px 16px; }
+.coupon-plans legend { font-size: 12px; color: var(--muted); padding: 0 4px; }
+.coupon-row-admin { flex-wrap: wrap; }
+.coupon-redemptions { flex-basis: 100%; display: grid; gap: 4px; padding-top: 8px; border-top: 1px dashed var(--line); }
+
+/* Admin analytics */
+.analytics-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }
+.analytics-charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; margin: 14px 0; }
+.analytics-charts h3, .analytics-panel h3 { margin: 0 0 6px; font-size: 13px; }
+.analytics-bars { display: flex; align-items: flex-end; gap: 2px; block-size: 110px; padding: 8px; border: 1px solid var(--line); border-radius: 12px; }
+.analytics-bars span { flex: 1; min-inline-size: 2px; border-radius: 3px 3px 1px 1px; background: var(--accent); }
+.analytics-funnel { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; margin-bottom: 14px; }
+.analytics-funnel div { display: grid; gap: 2px; padding: 10px; border: 1px solid var(--line); border-radius: 12px; }
+.analytics-funnel strong { font-size: 20px; }
+.analytics-funnel small { color: var(--muted); }
+.analytics-segments { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; }
+.analytics-seg-row { display: grid; grid-template-columns: 1fr 2fr auto; align-items: center; gap: 8px; font-size: 13px; padding: 3px 0; }
+.analytics-seg-bar { block-size: 8px; border-radius: 99px; background: var(--soft); overflow: hidden; }
+.analytics-seg-bar i { display: block; block-size: 100%; background: var(--accent); }

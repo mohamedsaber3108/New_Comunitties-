@@ -493,6 +493,55 @@ export const PaymentAttempt = sequelize.define("PaymentAttempt", {
   RegistrationId: { type: DataTypes.UUID },
 });
 // -------------------------------------------------------------------------
+// Coupons / promo codes. The discount is always computed on the server from
+// the coupon row and the server-side price; the client only sends the code.
+// Usage is counted from CouponRedemption rows: "redeemed" (payment confirmed
+// or a 100%-off activation) plus "reserved" rows whose payment attempt is
+// still open - so concurrent checkouts can never exceed the limits, and an
+// abandoned / failed / expired checkout frees its use automatically.
+// -------------------------------------------------------------------------
+export const Coupon = sequelize.define("Coupon", {
+  ...common,
+  code: { type: DataTypes.STRING(40), allowNull: false, unique: true },
+  description: { type: DataTypes.STRING(240), defaultValue: "" },
+  discountType: { type: DataTypes.ENUM("percent", "fixed"), allowNull: false },
+  // percent: 1..100; fixed: whole EGP
+  value: { type: DataTypes.INTEGER, allowNull: false },
+  appliesTo: {
+    type: DataTypes.ENUM("any", "subscription", "event"),
+    defaultValue: "any",
+  },
+  // JSON array of plan codes; empty = every paid plan.
+  planCodes: { type: DataTypes.TEXT, defaultValue: "[]" },
+  billingCycle: {
+    type: DataTypes.ENUM("any", "monthly", "yearly"),
+    defaultValue: "any",
+  },
+  maxRedemptions: { type: DataTypes.INTEGER }, // null = unlimited
+  perUserLimit: { type: DataTypes.INTEGER, defaultValue: 1 },
+  startsAt: { type: DataTypes.DATE },
+  expiresAt: { type: DataTypes.DATE },
+  active: { type: DataTypes.BOOLEAN, defaultValue: true },
+});
+export const CouponRedemption = sequelize.define(
+  "CouponRedemption",
+  {
+    ...common,
+    status: {
+      type: DataTypes.ENUM("reserved", "redeemed"),
+      defaultValue: "reserved",
+    },
+    target: { type: DataTypes.ENUM("subscription", "event"), allowNull: false },
+    originalEgp: { type: DataTypes.INTEGER, allowNull: false },
+    discountEgp: { type: DataTypes.INTEGER, allowNull: false },
+    finalEgp: { type: DataTypes.INTEGER, allowNull: false },
+    PaymentAttemptId: { type: DataTypes.UUID },
+    SubscriptionId: { type: DataTypes.UUID },
+    RegistrationId: { type: DataTypes.UUID },
+  },
+  { indexes: [{ fields: ["CouponId", "status"] }, { fields: ["UserId", "CouponId"] }, { fields: ["PaymentAttemptId"] }] },
+);
+// -------------------------------------------------------------------------
 // WebhookEvent: idempotent ledger of inbound provider callbacks. A unique
 // (provider, eventId) guarantees a replayed webhook is processed once.
 // -------------------------------------------------------------------------
@@ -764,6 +813,11 @@ Subscription.hasMany(PaymentAttempt);
 PaymentAttempt.belongsTo(Subscription);
 // constraints:false keeps the column identical whether it came from the
 // baseline sync or from migration 0004 (which adds it without an FK).
+Coupon.hasMany(CouponRedemption);
+CouponRedemption.belongsTo(Coupon);
+CouponRedemption.belongsTo(User);
+CouponRedemption.belongsTo(PaymentAttempt, { foreignKey: "PaymentAttemptId", constraints: false });
+PaymentAttempt.hasOne(CouponRedemption, { foreignKey: "PaymentAttemptId", constraints: false });
 User.hasMany(MediaAsset);
 MediaAsset.belongsTo(User);
 Post.hasMany(MediaAsset, { as: "images" });

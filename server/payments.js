@@ -23,6 +23,7 @@ import { config } from "./config.js";
 import { logger } from "./logger.js";
 import { enqueueEmail } from "./jobs.js";
 import crypto from "node:crypto";
+import { markCouponRedeemed } from "./coupons.js";
 
 // Paymob sends boolean-ish fields inconsistently across endpoints/webhooks
 // (observed as both JSON booleans and the strings "true"/"false").
@@ -39,6 +40,8 @@ export function registerPaymentRoutes(app, deps) {
     WebhookEvent,
     Registration,
     Event,
+    Coupon,
+    CouponRedemption,
     auth,
     admin,
     fail,
@@ -90,12 +93,20 @@ export function registerPaymentRoutes(app, deps) {
         include: [
           { model: Subscription, include: [Plan] },
           { model: Registration, include: [{ model: Event, attributes: ["id", "title", "startsAt"] }] },
+          { model: CouponRedemption, include: [{ model: Coupon, attributes: ["code"] }], required: false },
         ],
         order: [["createdAt", "DESC"]],
         limit: 50,
       });
       res.json({
         items: rows.map((p) => ({
+          coupon: p.CouponRedemption
+            ? {
+                code: p.CouponRedemption.Coupon?.code,
+                originalEgp: p.CouponRedemption.originalEgp,
+                discountEgp: p.CouponRedemption.discountEgp,
+              }
+            : null,
           event: p.Registration?.Event
             ? { id: p.Registration.Event.id, title: p.Registration.Event.title, startsAt: p.Registration.Event.startsAt }
             : null,
@@ -574,6 +585,7 @@ async function activateFromPayment(deps, attempt, txn) {
       },
       { transaction: t },
     );
+    await markCouponRedeemed(deps, attempt.id, t);
   });
 }
 
@@ -606,6 +618,7 @@ async function confirmTicketFromPayment(deps, attempt, txn) {
       },
       { transaction: t },
     );
+    await markCouponRedeemed(deps, attempt.id, t);
     confirmed = reg;
   });
   if (confirmed) {
@@ -711,7 +724,8 @@ export async function runPaymentMaintenance(d) {
   }
 
   const ended = await Subscription.findAll({
-    where: { status: "active", amountEgp: { [Op.gt]: 0 }, endsAt: { [Op.lt]: now } },
+    // Every paid-plan term ends, including ones granted by a 100% coupon.
+    where: { status: "active", endsAt: { [Op.lt]: now } },
     include: [Plan, User],
     limit: 200,
   });
@@ -730,7 +744,6 @@ export async function runPaymentMaintenance(d) {
   const soon = await Subscription.findAll({
     where: {
       status: "active",
-      amountEgp: { [Op.gt]: 0 },
       renewalReminderSentAt: null,
       endsAt: { [Op.gt]: now, [Op.lt]: new Date(Date.now() + 7 * 86400_000) },
     },

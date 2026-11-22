@@ -2821,6 +2821,29 @@ function EventDetail() {
   const own = mine && !["cancelled", "expired"].includes(mine.status) ? mine : null;
   const paid = e?.priceType === "paid";
   const [busy, setBusy] = useState(false);
+  const [couponInput, setCouponInput] = useState(""),
+    [coupon, setCoupon] = useState(null),
+    [couponError, setCouponError] = useState(""),
+    [checkingCoupon, setCheckingCoupon] = useState(false);
+  async function applyCoupon(ev) {
+    ev.preventDefault();
+    if (!user) return location.assign("/login");
+    setCheckingCoupon(true);
+    setCouponError("");
+    try {
+      setCoupon(
+        await api("/coupons/quote", {
+          method: "POST",
+          body: JSON.stringify({ code: couponInput.trim(), eventId: id }),
+        }),
+      );
+    } catch (err) {
+      setCoupon(null);
+      setCouponError(couponErrorText(err.message, L));
+    } finally {
+      setCheckingCoupon(false);
+    }
+  }
   const errorText = (code) =>
     ({
       event_full: L("اكتملت المقاعد", "This event is sold out"),
@@ -2846,6 +2869,7 @@ function EventDetail() {
       const cancelling = own && !(paid && own.status === "pending_payment");
       const r = await api(`/events/${id}/register`, {
         method: cancelling ? "DELETE" : "POST",
+        ...(!cancelling && coupon ? { body: JSON.stringify({ couponCode: coupon.code }) } : {}),
       });
       if (r.checkoutUrl) {
         // Paid ticket: the seat is held while the member pays on Paymob.
@@ -2861,7 +2885,10 @@ function EventDetail() {
       );
       setRefresh((x) => x + 1);
     } catch (e) {
-      setToast(errorText(e.message));
+      if (e.message.startsWith("coupon_")) {
+        setCoupon(null);
+        setCouponError(couponErrorText(e.message, L));
+      } else setToast(errorText(e.message));
     } finally {
       setBusy(false);
     }
@@ -2932,6 +2959,20 @@ function EventDetail() {
                   )}
                 </p>
               )}
+              {paid && !own && e.status === "published" && e.seatsLeft > 0 && (
+                <CouponField
+                  value={couponInput}
+                  onChange={setCouponInput}
+                  onApply={applyCoupon}
+                  onRemove={() => {
+                    setCoupon(null);
+                    setCouponInput("");
+                  }}
+                  applied={coupon}
+                  error={couponError}
+                  busy={checkingCoupon}
+                />
+              )}
               {e.status !== "cancelled" && !(paid && own?.status === "registered") && (
                 <button
                   className="button button-accent"
@@ -2943,7 +2984,9 @@ function EventDetail() {
                     : paid
                       ? own?.status === "pending_payment"
                         ? L("أكمل الدفع", "Complete payment")
-                        : `${L("اشترِ تذكرة", "Buy ticket")} · ${formatEgp(e.priceEgp, lang)}`
+                        : coupon && coupon.finalEgp === 0
+                          ? L("احصل على تذكرتك بالكود", "Get my ticket with this code")
+                          : `${L("اشترِ تذكرة", "Buy ticket")} · ${formatEgp(coupon ? coupon.finalEgp : e.priceEgp, lang)}`
                       : own
                         ? L("إلغاء تسجيلي", "Cancel registration")
                         : L("سجّل الآن", "Register now")}
@@ -5709,6 +5752,328 @@ function AdminWorkflowPanel({ refresh, setRefresh }) {
   );
 }
 // Catalog controls: publish/archive a perk, pause it, or feature it.
+// Admin analytics (wires GET /admin/analytics). Real counts over a rolling
+// window; the CSV export is generated in the browser from the same response.
+function AdminAnalyticsPanel() {
+  const [, L] = useText();
+  const { lang } = useApp();
+  const [days, setDays] = useState(30);
+  const { data, loading, error } = useData(`/admin/analytics?days=${days}`);
+  const Bars = ({ series, money }) => {
+    const max = Math.max(1, ...series.map((d) => d.value));
+    return (
+      <div className="analytics-bars" role="img" aria-label={series.map((d) => `${d.day}: ${d.value}`).join(", ")}>
+        {series.map((d) => (
+          <span key={d.day} title={`${d.day}: ${money ? formatEgp(d.value, lang) : d.value}`} style={{ blockSize: `${Math.max(2, (d.value / max) * 100)}%` }} />
+        ))}
+      </div>
+    );
+  };
+  const Seg = ({ title, map, label = (k) => k }) => {
+    const total = Object.values(map).reduce((a, b) => a + b, 0) || 1;
+    return (
+      <div className="analytics-segment">
+        <h3>{title}</h3>
+        {Object.entries(map)
+          .sort((a, b) => b[1] - a[1])
+          .map(([k, v]) => (
+            <div key={k} className="analytics-seg-row">
+              <span>{label(k)}</span>
+              <span className="analytics-seg-bar"><i style={{ inlineSize: `${(v / total) * 100}%` }} /></span>
+              <b>{v}</b>
+            </div>
+          ))}
+      </div>
+    );
+  };
+  function exportCsv() {
+    const rows = [["day", "new_members", "posts", "net_revenue_egp"]];
+    data.growth.newMembersByDay.forEach((d, i) =>
+      rows.push([d.day, d.value, data.engagement.postsByDay[i].value, data.revenue.netByDay[i].value]),
+    );
+    const blob = new Blob([rows.map((r) => r.join(",")).join("\n")], { type: "text/csv" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `usam-analytics-${days}d.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+  const community = (s) => personaData.find((p) => p.slug === s)?.name || s;
+  return (
+    <div className="settings-form analytics-panel">
+      <div className="analytics-head">
+        <h2>{L("التحليلات", "Analytics")}</h2>
+        <div className="feed-filters">
+          {[7, 30, 90].map((d) => (
+            <button key={d} type="button" className={days === d ? "active" : ""} onClick={() => setDays(d)}>
+              {L(`${d} يومًا`, `${d} days`)}
+            </button>
+          ))}
+          {data && (
+            <button type="button" onClick={exportCsv}>
+              {L("تصدير CSV", "Export CSV")}
+            </button>
+          )}
+        </div>
+      </div>
+      <Loadable loading={loading} error={error}>
+        {data && (
+          <>
+            <div className="stat-grid">
+              {[
+                [data.growth.totalMembers, L("إجمالي الأعضاء", "Total members"), Users],
+                [data.growth.newMembers, L("أعضاء جدد", "New members"), Plus],
+                [data.engagement.activeMembers, L("أعضاء نشطون", "Active members"), UserRound],
+                [formatEgp(data.revenue.netEgp, lang), L("صافي الإيرادات", "Net revenue"), CreditCard],
+                [data.revenue.payingMembers, L("أعضاء دافعون", "Paying members"), BadgeCheck],
+                [formatEgp(data.revenue.couponDiscountEgp, lang), L("خصومات الأكواد", "Promo discounts"), Gift],
+              ].map(([v, label, Icon]) => (
+                <div className="stat-card" key={label}>
+                  <Icon size={20} />
+                  <strong>{v}</strong>
+                  <span>{label}</span>
+                </div>
+              ))}
+            </div>
+            <div className="analytics-charts">
+              <div>
+                <h3>{L("أعضاء جدد يوميًا", "New members per day")}</h3>
+                <Bars series={data.growth.newMembersByDay} />
+              </div>
+              <div>
+                <h3>{L("صافي الإيرادات يوميًا", "Net revenue per day")}</h3>
+                <Bars series={data.revenue.netByDay} money />
+              </div>
+              <div>
+                <h3>{L("المنشورات يوميًا", "Posts per day")}</h3>
+                <Bars series={data.engagement.postsByDay} />
+              </div>
+            </div>
+            <p className="muted">
+              {L("الاشتراكات", "Plans")} {formatEgp(data.revenue.plansEgp, lang)} · {L("الفعاليات", "Events")}{" "}
+              {formatEgp(data.revenue.eventsEgp, lang)} · {L("مستردات", "Refunds")} {formatEgp(data.revenue.refundsEgp, lang)} ·{" "}
+              {L("تعليقات", "Comments")} {data.engagement.comments} · {L("رسائل", "Messages")} {data.engagement.messages} ·{" "}
+              {L("تسجيلات فعاليات", "Event registrations")} {data.engagement.eventRegistrations} · {L("حضور", "Check-ins")}{" "}
+              {data.engagement.eventCheckIns}
+            </p>
+            <h3>{L("مسار التحويل", "Conversion funnel")}</h3>
+            <div className="analytics-funnel">
+              {[
+                [L("سجّلوا", "Signed up"), data.funnel.signedUp],
+                [L("وثّقوا البريد", "Verified email"), data.funnel.verified],
+                [L("انضموا لمجتمع", "Joined a community"), data.funnel.joinedCommunity],
+                [L("نشروا", "Posted"), data.funnel.posted],
+                [L("دفعوا", "Paid"), data.funnel.paid],
+              ].map(([label, v]) => (
+                <div key={label}>
+                  <strong>{v}</strong>
+                  <span>{label}</span>
+                  <small>{data.funnel.signedUp ? Math.round((v / data.funnel.signedUp) * 100) : 0}%</small>
+                </div>
+              ))}
+            </div>
+            <div className="analytics-segments">
+              <Seg title={L("حسب المجتمع", "By community")} map={data.segments.byCommunity} label={community} />
+              <Seg title={L("حسب الخطة", "By plan")} map={data.segments.byPlan} label={(k) => (k === "none" ? L("بدون خطة", "No plan") : k)} />
+              <Seg title={L("حسب المسار", "By persona")} map={data.segments.byPersona} label={community} />
+              <Seg title={L("حسب الدور", "By role")} map={data.segments.byRole} />
+            </div>
+          </>
+        )}
+      </Loadable>
+    </div>
+  );
+}
+// Admin: promo codes (wires /admin/coupons). Usage numbers are live from the
+// server: "uses" counts confirmed redemptions plus checkouts still open.
+function AdminCouponsPanel() {
+  const [, L] = useText();
+  const { setToast, lang } = useApp();
+  const [refresh, setRefresh] = useState(0);
+  const { data, loading, error } = useData("/admin/coupons", refresh);
+  const plans = useData("/admin/plans").data?.items || [];
+  const blank = {
+    code: "", description: "", discountType: "percent", value: "", appliesTo: "any",
+    planCodes: [], billingCycle: "any", maxRedemptions: "", perUserLimit: 1, expiresAt: "",
+  };
+  const [form, setForm] = useState(blank);
+  const [openId, setOpenId] = useState(null);
+  const reds = useData(openId ? `/admin/coupons/${openId}/redemptions` : null, refresh);
+  const fieldText = (f) =>
+    ({
+      code: L("الكود: ٣-٤٠ حرفًا لاتينيًا أو رقمًا", "Code: 3-40 letters, digits, - or _"),
+      value: L("القيمة: نسبة ١-١٠٠ أو مبلغ صحيح", "Value: 1-100 % or a whole EGP amount"),
+      expiresAt: L("تاريخ الانتهاء يجب أن يكون بعد البداية", "Expiry must be after the start"),
+    })[f] || f;
+  async function create(e) {
+    e.preventDefault();
+    try {
+      await api("/admin/coupons", {
+        method: "POST",
+        body: JSON.stringify({
+          ...form,
+          value: Number(form.value),
+          maxRedemptions: form.maxRedemptions === "" ? null : Number(form.maxRedemptions),
+          perUserLimit: Number(form.perUserLimit),
+          expiresAt: form.expiresAt ? new Date(form.expiresAt).toISOString() : null,
+        }),
+      });
+      setForm(blank);
+      setRefresh((x) => x + 1);
+      setToast(L("تم إنشاء الكود", "Promo code created"));
+    } catch (err) {
+      setToast(err.message === "coupon_code_taken" ? L("الكود مستخدم بالفعل", "That code already exists") : L("راجع الحقول", "Check the fields"));
+    }
+  }
+  async function patch(c, body, done) {
+    try {
+      await api(`/admin/coupons/${c.id}`, { method: "PATCH", body: JSON.stringify(body) });
+      setRefresh((x) => x + 1);
+      setToast(done);
+    } catch (err) {
+      setToast(err.message);
+    }
+  }
+  const describe = (c) =>
+    `${c.discountType === "percent" ? `${c.value}%` : formatEgp(c.value, lang)} · ${
+      { any: L("الكل", "everything"), subscription: L("الاشتراكات", "plans"), event: L("الفعاليات", "events") }[c.appliesTo]
+    }${c.planCodes.length ? ` (${c.planCodes.join(", ")})` : ""}${c.billingCycle !== "any" ? ` · ${c.billingCycle}` : ""}`;
+  return (
+    <div className="admin-content-grid">
+      <form className="settings-form" onSubmit={create}>
+        <h2>{L("كود خصم جديد", "New promo code")}</h2>
+        <div className="form-columns">
+          <label>
+            {L("الكود", "Code")}
+            <input dir="ltr" required maxLength="40" value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value.toUpperCase() })} />
+          </label>
+          <label>
+            {L("الوصف", "Description")}
+            <input maxLength="240" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
+          </label>
+        </div>
+        <div className="form-columns">
+          <label>
+            {L("نوع الخصم", "Discount type")}
+            <select value={form.discountType} onChange={(e) => setForm({ ...form, discountType: e.target.value })}>
+              <option value="percent">{L("نسبة مئوية", "Percent")}</option>
+              <option value="fixed">{L("مبلغ ثابت (ج.م)", "Fixed amount (EGP)")}</option>
+            </select>
+          </label>
+          <label>
+            {L("القيمة", "Value")}
+            <input type="number" min="1" max={form.discountType === "percent" ? 100 : 100000} required value={form.value} onChange={(e) => setForm({ ...form, value: e.target.value })} />
+          </label>
+        </div>
+        <div className="form-columns">
+          <label>
+            {L("ينطبق على", "Applies to")}
+            <select value={form.appliesTo} onChange={(e) => setForm({ ...form, appliesTo: e.target.value })}>
+              <option value="any">{L("الاشتراكات والفعاليات", "Plans and events")}</option>
+              <option value="subscription">{L("الاشتراكات فقط", "Plans only")}</option>
+              <option value="event">{L("تذاكر الفعاليات فقط", "Event tickets only")}</option>
+            </select>
+          </label>
+          <label>
+            {L("دورة الفوترة", "Billing cycle")}
+            <select value={form.billingCycle} onChange={(e) => setForm({ ...form, billingCycle: e.target.value })}>
+              <option value="any">{L("أي دورة", "Any")}</option>
+              <option value="monthly">{L("شهري", "Monthly")}</option>
+              <option value="yearly">{L("سنوي", "Yearly")}</option>
+            </select>
+          </label>
+        </div>
+        {form.appliesTo !== "event" && (
+          <fieldset className="coupon-plans">
+            <legend>{L("الخطط (اتركها فارغة لكل الخطط المدفوعة)", "Plans (leave empty for every paid plan)")}</legend>
+            {plans.filter((p) => p.monthlyEgp > 0).map((p) => (
+              <label key={p.code} className="check-row">
+                <input
+                  type="checkbox"
+                  checked={form.planCodes.includes(p.code)}
+                  onChange={(e) =>
+                    setForm({
+                      ...form,
+                      planCodes: e.target.checked ? [...form.planCodes, p.code] : form.planCodes.filter((x) => x !== p.code),
+                    })
+                  }
+                />
+                {lang === "ar" ? p.nameAr : p.nameEn}
+              </label>
+            ))}
+          </fieldset>
+        )}
+        <div className="form-columns">
+          <label>
+            {L("الحد الأقصى للاستخدام", "Total uses limit")}
+            <input type="number" min="1" placeholder={L("بلا حد", "Unlimited")} value={form.maxRedemptions} onChange={(e) => setForm({ ...form, maxRedemptions: e.target.value })} />
+          </label>
+          <label>
+            {L("لكل عضو", "Per member")}
+            <input type="number" min="1" required value={form.perUserLimit} onChange={(e) => setForm({ ...form, perUserLimit: e.target.value })} />
+          </label>
+        </div>
+        <label>
+          {L("ينتهي في", "Expires at")}
+          <input type="datetime-local" value={form.expiresAt} onChange={(e) => setForm({ ...form, expiresAt: e.target.value })} />
+        </label>
+        <button className="button button-accent">
+          {L("إنشاء الكود", "Create code")}
+          <Plus size={16} />
+        </button>
+      </form>
+      <div className="settings-form">
+        <h2>{L("أكواد الخصم", "Promo codes")}</h2>
+        <Loadable loading={loading} error={error}>
+          {data?.items?.length ? (
+            data.items.map((c) => (
+              <div className="admin-row coupon-row-admin" key={c.id}>
+                <div>
+                  <strong dir="ltr">{c.code}</strong>{" "}
+                  <span className={`status-pill ${c.active ? "active" : "canceled"}`}>
+                    {c.active ? L("مفعّل", "Active") : L("موقوف", "Paused")}
+                  </span>
+                  <p>{c.description}</p>
+                  <small>
+                    {describe(c)} · {L("الاستخدام", "Uses")} {c.uses}
+                    {c.maxRedemptions ? `/${c.maxRedemptions}` : ""} · {L("مؤكد", "redeemed")} {c.redeemed} ·{" "}
+                    {L("إجمالي الخصم", "discount given")} {formatEgp(c.discountGivenEgp, lang)}
+                    {c.expiresAt ? ` · ${L("ينتهي", "expires")} ${new Date(c.expiresAt).toLocaleDateString()}` : ""}
+                  </small>
+                </div>
+                <div className="admin-perk-actions">
+                  <button onClick={() => patch(c, { active: !c.active }, c.active ? L("تم الإيقاف", "Paused") : L("تم التفعيل", "Activated"))}>
+                    {c.active ? L("إيقاف", "Pause") : L("تفعيل", "Activate")}
+                  </button>
+                  <button onClick={() => setOpenId(openId === c.id ? null : c.id)}>
+                    {openId === c.id ? L("إخفاء", "Hide") : L("الاستخدامات", "Redemptions")}
+                  </button>
+                </div>
+                {openId === c.id && (
+                  <div className="coupon-redemptions">
+                    {reds.data?.items?.length ? (
+                      reds.data.items.map((r) => (
+                        <small key={r.id}>
+                          {r.member?.name} ({r.member?.email}) · {r.target} · {formatEgp(r.originalEgp, lang)} → {formatEgp(r.finalEgp, lang)} ·{" "}
+                          {{ redeemed: L("مؤكد", "redeemed"), reserved: L("بانتظار الدفع", "awaiting payment"), released: L("أُلغي", "released") }[r.status]} ·{" "}
+                          {new Date(r.createdAt).toLocaleString()}
+                        </small>
+                      ))
+                    ) : (
+                      <small className="muted">{L("لم يُستخدم بعد", "Not used yet")}</small>
+                    )}
+                  </div>
+                )}
+              </div>
+            ))
+          ) : (
+            <p className="muted">{L("لا توجد أكواد بعد", "No promo codes yet")}</p>
+          )}
+        </Loadable>
+      </div>
+    </div>
+  );
+}
 // Admin: every event with seats, revenue and a cancel action (wires
 // GET /admin/events and PATCH /admin/events/:id).
 function AdminEventsList({ refresh, setRefresh }) {
@@ -6798,6 +7163,8 @@ function AdminPage() {
           ["content", L("المجموعات والغرف", "Groups & rooms")],
           ["plans", L("الخطط", "Plans")],
           ["payments", L("المدفوعات", "Payments")],
+          ["coupons", L("أكواد الخصم", "Promo codes")],
+          ["analytics", L("التحليلات", "Analytics")],
           ["users", L("المستخدمون", "Users")],
           ["flags", L("الميزات", "Feature flags")],
           ["cms", L("المحتوى", "CMS")],
@@ -6883,6 +7250,8 @@ function AdminPage() {
         <AdminPlansPanel refresh={refresh} setRefresh={setRefresh} />
       )}
       {tab === "payments" && <AdminPaymentsPanel />}
+      {tab === "coupons" && <AdminCouponsPanel />}
+      {tab === "analytics" && <AdminAnalyticsPanel />}
       {tab === "users" && <AdminUsersPanel currentUser={user} />}
       {tab === "flags" && (
         <AdminFlagsPanel refresh={refresh} setRefresh={setRefresh} />
@@ -9717,6 +10086,63 @@ function PricingPage() {
   );
 }
 
+function couponErrorText(code, L) {
+  return (
+    {
+      coupon_invalid: L("الكود غير صحيح أو غير مفعّل", "This code is not valid"),
+      coupon_expired: L("انتهت صلاحية هذا الكود", "This code has expired"),
+      coupon_not_started: L("هذا الكود لم يبدأ بعد", "This code is not active yet"),
+      coupon_not_applicable: L("الكود لا ينطبق على هذا الاختيار", "This code doesn't apply to this choice"),
+      coupon_exhausted: L("تم استخدام هذا الكود بالكامل", "This code has been fully used"),
+      coupon_already_used: L("استخدمت هذا الكود من قبل", "You have already used this code"),
+      coupon_changed: L("تغيّر الكود، طبّقه مرة أخرى", "The code changed, apply it again"),
+      too_many_requests: L("محاولات كثيرة، حاول لاحقًا", "Too many attempts, try again later"),
+    }[code] || code
+  );
+}
+// Promo code input used by plan checkout and paid event tickets.
+function CouponField({ value, onChange, onApply, onRemove, applied, error, busy }) {
+  const [, L] = useText();
+  const { lang } = useApp();
+  if (applied)
+    return (
+      <div className="coupon-applied" role="status">
+        <BadgeCheck size={18} />
+        <span>
+          <strong>{applied.code}</strong>
+          {applied.description ? ` · ${applied.description}` : ""} · −{formatEgp(applied.discountEgp, lang)}
+        </span>
+        <button type="button" className="text-link button-reset" onClick={onRemove}>
+          {L("إزالة", "Remove")}
+        </button>
+      </div>
+    );
+  return (
+    <form className="coupon-field" onSubmit={onApply}>
+      <label>
+        {L("كود الخصم", "Promo code")}
+        <span className="coupon-row">
+          <input
+            dir="ltr"
+            maxLength="40"
+            autoComplete="off"
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            placeholder="WELCOME20"
+          />
+          <button className="button button-outline" disabled={busy || !value.trim()}>
+            {busy ? "…" : L("تطبيق", "Apply")}
+          </button>
+        </span>
+      </label>
+      {error && (
+        <p className="form-error" role="alert">
+          {error}
+        </p>
+      )}
+    </form>
+  );
+}
 function CheckoutPage() {
   const { planCode } = useParams(),
     location = useLocation(),
@@ -9729,12 +10155,34 @@ function CheckoutPage() {
     [message, setMessage] = useState(""),
     // One key per page visit: a double-click or retry replays the SAME payment
     // instead of creating a second one (server dedupes on this key).
-    [idempotencyKey] = useState(() => crypto.randomUUID());
+    [idempotencyKey] = useState(() => crypto.randomUUID()),
+    [couponInput, setCouponInput] = useState(""),
+    [coupon, setCoupon] = useState(null),
+    [couponError, setCouponError] = useState(""),
+    [checkingCoupon, setCheckingCoupon] = useState(false);
   const cycle =
     new URLSearchParams(location.search).get("cycle") === "monthly"
       ? "monthly"
       : "yearly";
   const plan = data?.items?.find((x) => x.code === planCode);
+  async function applyCoupon(e) {
+    e.preventDefault();
+    if (!couponInput.trim() || !plan) return;
+    setCheckingCoupon(true);
+    setCouponError("");
+    try {
+      const q = await api("/coupons/quote", {
+        method: "POST",
+        body: JSON.stringify({ code: couponInput.trim(), planCode: plan.code, billingCycle: cycle }),
+      });
+      setCoupon(q);
+    } catch (err) {
+      setCoupon(null);
+      setCouponError(couponErrorText(err.message, L));
+    } finally {
+      setCheckingCoupon(false);
+    }
+  }
   async function submit() {
     if (!accepted || !plan) return;
     setBusy(true);
@@ -9743,8 +10191,18 @@ function CheckoutPage() {
       const result = await api("/subscriptions", {
         method: "POST",
         headers: { "Idempotency-Key": idempotencyKey },
-        body: JSON.stringify({ planCode: plan.code, billingCycle: cycle }),
+        body: JSON.stringify({
+          planCode: plan.code,
+          billingCycle: cycle,
+          ...(coupon ? { couponCode: coupon.code } : {}),
+        }),
       });
+      if (result.status === "active") {
+        // A 100% promo code: active immediately, nothing to pay.
+        setToast(L("تم تفعيل عضويتك", "Your membership is active"));
+        navigate("/billing", { replace: true });
+        return;
+      }
       // Paid plan with a live provider: send the member to the hosted payment
       // page. Nothing is activated here; only the server (after a verified
       // provider callback) can activate a paid plan.
@@ -9769,6 +10227,11 @@ function CheckoutPage() {
       }
       navigate("/billing", { replace: true });
     } catch (e) {
+      if (e.message.startsWith("coupon_")) {
+        setCoupon(null);
+        setCouponError(couponErrorText(e.message, L));
+        return;
+      }
       setMessage(
         e.message === "idempotency_key_required"
           ? L(
@@ -9793,7 +10256,8 @@ function CheckoutPage() {
         error={error || (!loading && !plan ? "not_found" : null)}
       />
     );
-  const amount = cycle === "yearly" ? plan.yearlyEgp : plan.monthlyEgp;
+  const listAmount = cycle === "yearly" ? plan.yearlyEgp : plan.monthlyEgp;
+  const amount = coupon ? coupon.finalEgp : listAmount;
   return (
     <div className="checkout-page">
       <AppHeading
@@ -9818,8 +10282,25 @@ function CheckoutPage() {
                 ? L("اشتراك سنوي", "Annual membership")
                 : L("اشتراك شهري", "Monthly membership")}
             </span>
-            <strong>{formatEgp(amount, lang)}</strong>
+            <strong>
+              {coupon && <s className="muted">{formatEgp(listAmount, lang)}</s>}{" "}
+              {formatEgp(amount, lang)}
+            </strong>
           </div>
+          {listAmount > 0 && (
+            <CouponField
+              value={couponInput}
+              onChange={setCouponInput}
+              onApply={applyCoupon}
+              onRemove={() => {
+                setCoupon(null);
+                setCouponInput("");
+              }}
+              applied={coupon}
+              error={couponError}
+              busy={checkingCoupon}
+            />
+          )}
           <Link className="text-link" to="/pricing">
             {L("غيّر الخطة", "Change plan")}
             <ArrowUpLeft size={16} />
@@ -9876,7 +10357,9 @@ function CheckoutPage() {
               ? t.loading
               : amount
                 ? L("المتابعة إلى الدفع", "Continue to payment")
-                : L("فعّل الخطة المجانية", "Activate free plan")}
+                : coupon
+                  ? L("فعّل العضوية بالكود", "Activate with this code")
+                  : L("فعّل الخطة المجانية", "Activate free plan")}
             <ArrowUpLeft size={17} />
           </button>
         </section>
@@ -10069,7 +10552,7 @@ function BillingPage() {
                   {busy
                     ? t.loading
                     : data.subscription.status === "active" &&
-                        data.subscription.amountEgp > 0
+                        data.subscription.endsAt
                       ? L("إلغاء التجديد", "Cancel at end of term")
                       : L("إلغاء الخطة", "Cancel plan")}
                 </button>

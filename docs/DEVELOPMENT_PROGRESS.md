@@ -77,6 +77,7 @@ AI assistant (blocked by the blueprint pending provider/privacy approval); WebAu
 | 2026-11-04 | backup -> restore | identical counts + checksum |
 | 2026-11-04 | production boot + SIGTERM | clean (12 ms shutdown) |
 | 2026-11-10 | manual activation restricted to super_admin when Paymob is live | `payments.test.js` 13/13 |
+| 2026-11-22 | promo codes + admin analytics (migration 0006); live host on HTTPS | 136/136 SQLite + 136/136 PostgreSQL; 26/26 E2E; live-release DB upgraded with 0006 |
 | 2026-11-17 | realtime, paid tickets, post images, Google sign-in, org analytics, deletion purge, event cancel + refunds (migrations 0004-0005) | 125/125 SQLite + 125/125 PostgreSQL; 25/25 Edge E2E; 20/20 Nginx container checks; old-release DB upgraded in place |
 | 2026-11-10 | TOTP two-factor (migration 0003) | `mfa.test.js` 8/8 (RFC 6238 vectors); migration add/down/re-add verified on PostgreSQL; full suite 105/105 SQLite + 105/105 PostgreSQL; Edge E2E 16/16 |
 

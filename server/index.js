@@ -52,6 +52,8 @@ import {
   OutboxMessage,
   WebhookEvent,
   MediaAsset,
+  Coupon,
+  CouponRedemption,
   publicUser,
   seedReferenceData,
   isPostgres,
@@ -80,6 +82,8 @@ import { registerIdentityRoutes } from "./identity.js";
 import { registerMfaRoutes, checkSecondFactor } from "./mfa.js";
 import { registerRealtimeRoutes, publish, closeAllStreams } from "./realtime.js";
 import { registerGoogleRoutes } from "./google.js";
+import { registerCouponRoutes, quoteCoupon, reserveCoupon } from "./coupons.js";
+import { registerAnalyticsRoutes } from "./analytics.js";
 import { registerPaymentRoutes, runPaymentMaintenance } from "./payments.js";
 import { runNotificationDigests } from "./notifications.js";
 import { runHousekeeping } from "./housekeeping.js";
@@ -98,6 +102,8 @@ const selfUser = (u) =>
     // Google-created accounts have no usable password until they set one.
     hasPassword: !String(u.passwordHash || "").startsWith("!"),
   };
+
+const couponModels = { Coupon, CouponRedemption, PaymentAttempt, Op };
 
 const app = express();
 app.disable("x-powered-by");
@@ -358,8 +364,10 @@ async function paidAccess(UserId) {
   const subscription = await Subscription.findOne({
     where: {
       UserId,
+      // "active" is only ever used for paid plans (free plans are "free").
+      // It is NOT keyed on the amount charged: a 100%-off coupon makes that 0
+      // while the member is still entitled to the paid plan.
       status: "active",
-      amountEgp: { [Op.gt]: 0 },
       // Entitlement ends with the paid term even if the expiry job hasn't
       // flipped the status yet.
       [Op.or]: [{ endsAt: null }, { endsAt: { [Op.gt]: new Date() } }],
@@ -817,8 +825,47 @@ app.post("/api/v1/subscriptions", auth, requireVerified, async (req, res, next) 
       cycle = clean(req.body.billingCycle, 12);
     if (!plan || !["monthly", "yearly"].includes(cycle))
       return fail(res, 400, "invalid_plan");
-    const amount = cycle === "yearly" ? plan.yearlyEgp : plan.monthlyEgp;
-    if (amount === 0) {
+    const listAmount = cycle === "yearly" ? plan.yearlyEgp : plan.monthlyEgp;
+    let amount = listAmount;
+    const couponCode = clean(req.body.couponCode, 40);
+    const couponTarget = { kind: "subscription", planCode: plan.code, cycle };
+    // Preview the coupon outside the transaction for a fast, clear error; it
+    // is re-checked with the coupon row locked when the use is recorded.
+    if (couponCode && listAmount > 0) {
+      const q = await quoteCoupon(couponModels, { code: couponCode, user: req.user, target: couponTarget, baseAmount: listAmount });
+      if (!q.ok) return fail(res, 400, q.error);
+      amount = q.finalEgp;
+    }
+    if (couponCode && listAmount > 0 && amount === 0) {
+      // 100% discount: nothing to charge, so no payment provider is involved.
+      // The membership activates now and the code counts as redeemed.
+      const out = await sequelize.transaction(async (t) => {
+        const q = await quoteCoupon(couponModels, { code: couponCode, user: req.user, target: couponTarget, baseAmount: listAmount }, t);
+        if (!q.ok || q.finalEgp !== 0) throw Object.assign(new Error(q.error || "coupon_changed"), { status: 409 });
+        await Subscription.update(
+          { status: "canceled", canceledAt: new Date() },
+          { where: { UserId: req.user.id, status: { [Op.in]: ["free", "active", "pending_payment"] } }, transaction: t },
+        );
+        const endsAt = new Date();
+        endsAt.setMonth(endsAt.getMonth() + (cycle === "yearly" ? 12 : 1));
+        const subscription = await Subscription.create(
+          { UserId: req.user.id, PlanId: plan.id, billingCycle: cycle, status: "active", amountEgp: 0, provider: "coupon", startsAt: new Date(), endsAt },
+          { transaction: t },
+        );
+        await reserveCoupon(couponModels, q, { user: req.user, target: couponTarget, subscriptionId: subscription.id, redeemed: true }, t);
+        return { subscription, code: q.coupon.code };
+      });
+      await audit(req, "activate_subscription_with_coupon", "subscription", out.subscription.id, `${plan.code}:${cycle}:${out.code}`);
+      await notify(req.user.id, "subscription_active", "Your USAM membership is active", "/billing");
+      return res.status(201).json({
+        subscriptionId: out.subscription.id,
+        status: "active",
+        amountEgp: 0,
+        originalEgp: listAmount,
+        plan: publicPlan(plan),
+      });
+    }
+    if (listAmount === 0) {
       await Subscription.update(
         { status: "canceled", canceledAt: new Date() },
         {
@@ -900,6 +947,14 @@ app.post("/api/v1/subscriptions", auth, requireVerified, async (req, res, next) 
         },
         { transaction: t },
       );
+      // Re-check the coupon with its row locked and record the use in the
+      // same transaction as the payment attempt (no over-redemption race).
+      let q = null;
+      if (couponCode) {
+        q = await quoteCoupon(couponModels, { code: couponCode, user: req.user, target: couponTarget, baseAmount: listAmount }, t);
+        if (!q.ok) throw Object.assign(new Error(q.error), { status: 400 });
+        if (q.finalEgp !== amount) throw Object.assign(new Error("coupon_changed"), { status: 409 });
+      }
       const payment = await PaymentAttempt.create(
         {
           UserId: req.user.id,
@@ -911,6 +966,8 @@ app.post("/api/v1/subscriptions", auth, requireVerified, async (req, res, next) 
         },
         { transaction: t },
       );
+      if (q)
+        await reserveCoupon(couponModels, q, { user: req.user, target: couponTarget, paymentAttemptId: payment.id, subscriptionId: subscription.id }, t);
       return { subscription, payment };
     });
     await audit(
@@ -951,6 +1008,7 @@ app.post("/api/v1/subscriptions", auth, requireVerified, async (req, res, next) 
       status: "pending_payment",
       paymentStatus: "pending",
       amountEgp: amount,
+      originalEgp: listAmount,
       currency: "EGP",
       checkout,
     });
@@ -974,7 +1032,6 @@ app.delete("/api/v1/subscriptions/current", auth, async (req, res, next) => {
     // subscriptions are simply cancelled now.
     const paidAndRunning =
       item.status === "active" &&
-      item.amountEgp > 0 &&
       item.endsAt &&
       item.endsAt > new Date();
     if (paidAndRunning) {
@@ -1596,7 +1653,9 @@ const PAID_SEAT_HOLD_MS = 30 * 60_000;
 // reconciliation in payments.js. Retrying while a hold is open reuses it.
 async function registerPaid(req, res, next) {
   try {
-    if (!paymob.isConfigured())
+    const couponCode = clean(req.body?.couponCode, 40);
+    // A 100%-off code needs no payment provider, so check that case first.
+    if (!paymob.isConfigured() && !couponCode)
       return fail(res, 409, "payment_provider_activation_required");
     const outcome = await sequelize.transaction(async (t) => {
       const e = await Event.findOne({
@@ -1636,6 +1695,26 @@ async function registerPaid(req, res, next) {
         transaction: t,
       });
       if (taken >= e.capacity) throw Object.assign(new Error("event_full"), { status: 409 });
+      // Optional coupon, checked with its row locked.
+      let q = null;
+      const couponTarget = { kind: "event", eventId: e.id };
+      if (couponCode) {
+        q = await quoteCoupon(couponModels, { code: couponCode, user: req.user, target: couponTarget, baseAmount: e.priceEgp }, t);
+        if (!q.ok) throw Object.assign(new Error(q.error), { status: 400 });
+      }
+      if (q && q.finalEgp === 0) {
+        // 100% off: the seat is confirmed now; no payment provider involved.
+        const ticketCode = crypto.randomBytes(10).toString("hex").toUpperCase();
+        const registration = existing
+          ? await existing.update({ status: "registered", ticketCode, paymentExpiresAt: null, checkedInAt: null }, { transaction: t })
+          : await Registration.create({ EventId: e.id, UserId: req.user.id, status: "registered", ticketCode }, { transaction: t });
+        await reserveCoupon(couponModels, q, { user: req.user, target: couponTarget, registrationId: registration.id, redeemed: true }, t);
+        return { status: "registered", free: true, registration, event: e, code: q.coupon.code };
+      }
+      // Something is still to be paid: without a live provider no seat is
+      // held and nothing is recorded.
+      if (!paymob.isConfigured())
+        throw Object.assign(new Error("payment_provider_activation_required"), { status: 409 });
       const paymentExpiresAt = new Date(Date.now() + PAID_SEAT_HOLD_MS);
       const registration = existing
         ? await existing.update(
@@ -1656,14 +1735,29 @@ async function registerPaid(req, res, next) {
           UserId: req.user.id,
           RegistrationId: registration.id,
           idempotencyKey: `event:${registration.id}:${crypto.randomBytes(6).toString("hex")}`,
-          amountEgp: e.priceEgp, // server-side price; never from the client
+          // server-side price (minus a server-validated coupon); never from the client
+          amountEgp: q ? q.finalEgp : e.priceEgp,
           status: "pending",
           provider: "paymob",
         },
         { transaction: t },
       );
+      if (q)
+        await reserveCoupon(couponModels, q, { user: req.user, target: couponTarget, paymentAttemptId: attempt.id, registrationId: registration.id }, t);
       return { status: "pending_payment", attempt, registration, event: e };
     });
+    if (outcome.free) {
+      await audit(req, "event_ticket_with_coupon", "registration", outcome.registration.id, outcome.code);
+      await enqueueEmail(req.user.email, "eventTicket", {
+        name: req.user.name,
+        eventTitle: outcome.event.title,
+        startsAt: outcome.event.startsAt,
+        eventId: outcome.event.id,
+        ticketCode: outcome.registration.ticketCode,
+      });
+      await notify(req.user.id, "event_ticket", `Your ticket for ${outcome.event.title} is confirmed`, `/events/${outcome.event.id}`);
+      return res.json({ status: "registered", amountEgp: 0 });
+    }
     if (outcome.status === "registered") return res.json({ status: "registered" });
     const attempt = await PaymentAttempt.findByPk(outcome.attempt.id, {
       include: [{ model: Registration, include: [Event] }],
@@ -4168,6 +4262,8 @@ const routeDeps = {
   Registration,
   Event,
   MediaAsset,
+  Coupon,
+  CouponRedemption,
   // middleware + helpers
   auth,
   admin,
@@ -4189,6 +4285,8 @@ const routeDeps = {
 registerIdentityRoutes(app, routeDeps);
 registerMfaRoutes(app, routeDeps);
 registerGoogleRoutes(app, routeDeps);
+registerCouponRoutes(app, routeDeps);
+registerAnalyticsRoutes(app, routeDeps);
 registerRealtimeRoutes(app, routeDeps);
 registerPaymentRoutes(app, routeDeps);
 registerMediaRoutes(app, routeDeps);
