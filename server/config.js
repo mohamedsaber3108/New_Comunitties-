@@ -51,6 +51,16 @@ export const config = {
     encryptionKey: str(process.env.MFA_ENCRYPTION_KEY),
     requireForAdmins: bool(process.env.REQUIRE_ADMIN_MFA, false),
     issuer: str(process.env.MFA_ISSUER, "USAM Communities"),
+    // Owner recovery switch: lets production start without staff MFA so a
+    // locked-out staff account can be recovered. Logs a loud warning at boot.
+    allowStaffWithoutMfa: bool(process.env.ALLOW_STAFF_WITHOUT_MFA, false),
+  },
+
+  // Staff (moderator/admin/super_admin) sessions are shorter than member
+  // sessions (SESSION_DAYS): idle timeout and absolute lifetime.
+  staffSession: {
+    idleMin: num(process.env.STAFF_SESSION_IDLE_MIN, 30),
+    maxHours: num(process.env.STAFF_SESSION_MAX_HOURS, 8),
   },
 
   // Email (AWS SES by default; console transport in dev/test)
@@ -163,6 +173,17 @@ export function assertProductionConfig() {
     errors.push("MFA_ENCRYPTION_KEY must be 64 hex characters (generate with: openssl rand -hex 32).");
   if (config.mfa.requireForAdmins && !config.mfa.encryptionKey)
     errors.push("REQUIRE_ADMIN_MFA=true requires MFA_ENCRYPTION_KEY.");
+  // Staff MFA start guard. ALLOW_STAFF_WITHOUT_MFA=true is the documented
+  // owner escape (recover a locked-out staff account); it downgrades to a
+  // loud warning.
+  if (config.mfa.allowStaffWithoutMfa)
+    warnings.push("ALLOW_STAFF_WITHOUT_MFA=true: staff MFA is NOT enforced. Recovery use only - enrol staff, set REQUIRE_ADMIN_MFA=true and remove this.");
+  else {
+    if (!config.mfa.requireForAdmins)
+      errors.push("Production requires REQUIRE_ADMIN_MFA=true (or the owner recovery escape ALLOW_STAFF_WITHOUT_MFA=true).");
+    if (!config.mfa.encryptionKey)
+      errors.push("Production requires MFA_ENCRYPTION_KEY (or the owner recovery escape ALLOW_STAFF_WITHOUT_MFA=true).");
+  }
   if (!config.mfa.encryptionKey)
     warnings.push("MFA_ENCRYPTION_KEY is not set; two-factor enrolment is unavailable (409 mfa_unavailable). Set it before launch.");
   if (config.storage.driver === "local")

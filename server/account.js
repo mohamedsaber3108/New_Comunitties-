@@ -204,7 +204,8 @@ export function registerAccountRoutes(app, deps) {
           suspendedAt: new Date(),
           suspensionReason: clean(req.body.reason, 400),
         });
-        await Session.destroy({ where: { UserId: target.id } });
+        const revoked = await Session.destroy({ where: { UserId: target.id } });
+        await audit(req, "user_sessions_revoked", "user", target.id, `suspend sessions:${revoked}`);
       } else if (action === "reinstate") {
         await target.update({
           status: "active",
@@ -228,6 +229,9 @@ export function registerAccountRoutes(app, deps) {
         )
           return fail(res, 403, "super_admin_required");
         await target.update({ role });
+        // A role change signs the target out everywhere (server-side delete).
+        const revoked = await Session.destroy({ where: { UserId: target.id } });
+        await audit(req, "user_sessions_revoked", "user", target.id, `role:${role} sessions:${revoked}`);
       } else {
         return fail(res, 400, "invalid_action");
       }
