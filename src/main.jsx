@@ -991,33 +991,45 @@ function useMorePages(base, first, refresh) {
   const key = `${base}|${refresh}`;
   const [more, setMore] = useState({ key: null, items: [], cursor: null });
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const statusRef = React.useRef(null);
   const fresh = more.key === key;
   const extra = fresh ? more.items : [];
   const cursor = fresh ? more.cursor : first?.nextCursor || null;
   async function loadMore() {
     if (!cursor || busy) return;
     setBusy(true);
+    setError("");
     try {
       const sep = base.includes("?") ? "&" : "?";
       const r = await api(`${base}${sep}cursor=${encodeURIComponent(cursor)}`);
       setMore({ key, items: [...extra, ...(r.items || [])], cursor: r.nextCursor || null });
+      // The button goes away on the last page: keep keyboard focus nearby.
+      if (!r.nextCursor) setTimeout(() => statusRef.current?.focus(), 0);
+    } catch (e) {
+      setError(e.message || "request_failed");
     } finally {
       setBusy(false);
     }
   }
-  return { items: [...(first?.items || []), ...extra], hasMore: !!cursor, loadMore, busy };
+  return { items: [...(first?.items || []), ...extra], hasMore: !!cursor, loadMore, busy, error, statusRef };
 }
 // A "Load more" button that keeps keyboard focus and announces the count.
 function loadMoreRow(list, L) {
   return (
     <div className="pagination-row">
-      <span role="status" aria-live="polite">
+      <span role="status" aria-live="polite" tabIndex={-1} ref={list.statusRef}>
         {L(`المعروض: ${list.items.length}`, `Showing ${list.items.length}`)}
       </span>
       {list.hasMore && (
-        <button className="button button-outline" disabled={list.busy} onClick={list.loadMore}>
+        // Not disabled while loading, so keyboard focus stays on it;
+        // a second click is ignored by loadMore.
+        <button className="button button-outline" aria-busy={list.busy} onClick={list.loadMore}>
           {list.busy ? L("جارٍ التحميل…", "Loading…") : L("عرض المزيد", "Load more")}
         </button>
+      )}
+      {list.error && (
+        <span role="alert">{L("تعذّر تحميل المزيد. حاول مرة أخرى.", "Could not load more. Try again.")}</span>
       )}
     </div>
   );

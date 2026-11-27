@@ -355,7 +355,8 @@ test("T-21: admin queues page through 120+ rows with no duplicates, even on equa
   assert.equal((await req("/admin/contact?cursor=not-a-cursor", "GET", null, adminCookie)).status, 400);
   // The reports queue uses the same paging (moderator route).
   const post = await Post.findOne();
-  if (post) {
+  assert.ok(post, "an earlier test created a post to report");
+  {
     await Report.bulkCreate(Array.from({ length: 60 }, (_, i) => ({ PostId: post.id, reason: `r${i}`, createdAt: same })));
     const first = await req("/admin/reports?limit=50", "GET", null, adminCookie);
     assert.equal(first.status, 200);
