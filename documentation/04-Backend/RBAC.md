@@ -23,7 +23,7 @@ Roles: `member` < `moderator` < `admin` < `super_admin`. A higher role passes ev
 
 Rules that apply to every role:
 - Nobody changes their own account. An admin cannot change the role of another admin or super admin; only a super admin grants `admin` or `super_admin`.
-- Suspend and reinstate are not limited by the target role today: an admin can suspend another admin or a super admin. This is a known gap to fix in code.
+- Only a super admin may suspend, reinstate or change the role of an admin or super admin account (`403 super_admin_required` for an admin).
 - A role change or a suspension ends every session of that user.
 - Staff sessions (moderator and up) end after 30 minutes idle or 8 hours (`STAFF_SESSION_IDLE_MIN`, `STAFF_SESSION_MAX_HOURS`); member sessions last `SESSION_DAYS`.
 - When `REQUIRE_ADMIN_MFA=true`, staff without two-factor get `403 mfa_setup_required` on staff routes. In production the app does not start unless that flag and `MFA_ENCRYPTION_KEY` are set, or `ALLOW_STAFF_WITHOUT_MFA=true` (logs a warning).
