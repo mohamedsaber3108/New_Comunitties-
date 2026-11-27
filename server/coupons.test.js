@@ -12,7 +12,7 @@ import crypto from "node:crypto";
 
 process.env.NODE_ENV = "test";
 process.env.DB_DIALECT = process.env.TEST_DB_DIALECT || "sqlite";
-const { prepareTestDatabase } = await import("./test-support.js");
+const { prepareTestDatabase, signupLogin } = await import("./test-support.js");
 const dropTestDb = await prepareTestDatabase();
 process.env.REQUIRE_EMAIL_VERIFICATION = "false";
 process.env.WORKER_ENABLED = "false";
@@ -57,7 +57,7 @@ async function req(route, method = "GET", body, cookie, headers = {}) {
 let n = 0;
 async function member() {
   const email = `coupon-${++n}-${Date.now()}@example.test`;
-  return (await req("/auth/signup", "POST", { name: `Member ${n}`, email, password: "abcdef1234", persona: "launchpad" })).cookie;
+  return (await signupLogin(req, { name: `Member ${n}`, email, password: "abcdef1234", persona: "launchpad" })).cookie;
 }
 const subscribe = (cookie, body) =>
   req("/subscriptions", "POST", { planCode: "plus", billingCycle: "monthly", ...body }, cookie, { "Idempotency-Key": crypto.randomUUID() });
@@ -82,7 +82,7 @@ before(async () => {
   server = app.listen(0, "127.0.0.1");
   await new Promise((r) => server.once("listening", r));
   base = `http://127.0.0.1:${server.address().port}`;
-  adminCookie = (await req("/auth/signup", "POST", { name: "Coupon Admin", email: "coupon-admin@example.test", password: "abcdef1234", persona: "launchpad" })).cookie;
+  adminCookie = (await signupLogin(req, { name: "Coupon Admin", email: "coupon-admin@example.test", password: "abcdef1234", persona: "launchpad" })).cookie;
   await User.update({ role: "admin" }, { where: { email: "coupon-admin@example.test" } });
 });
 after(async () => {

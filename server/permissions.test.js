@@ -10,7 +10,7 @@ import path from "node:path";
 import fs from "node:fs";
 process.env.NODE_ENV = "test";
 process.env.DB_DIALECT = process.env.TEST_DB_DIALECT || "sqlite";
-const { prepareTestDatabase } = await import("./test-support.js");
+const { prepareTestDatabase, signupLogin } = await import("./test-support.js");
 const dropTestDb = await prepareTestDatabase();
 process.env.REQUIRE_EMAIL_VERIFICATION = "false";
 process.env.WORKER_ENABLED = "false";
@@ -45,7 +45,7 @@ async function req(route, method = "GET", body, cookie) {
   };
 }
 async function signup(email, role) {
-  const r = await req("/auth/signup", "POST", {
+  const r = await signupLogin(req, {
     name: "User " + email,
     email,
     password: "abcdef1234",

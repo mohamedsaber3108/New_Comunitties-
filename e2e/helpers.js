@@ -114,7 +114,9 @@ export async function signUp(page, { name, email, password = "abcdef1234" }) {
   await page.getByLabel("Email address").fill(email);
   await page.getByLabel("Password").fill(password);
   await page.locator("button.auth-submit").click();
-  await page.waitForURL("**/home");
+  // Sign-up is neutral: it shows "check your email" and starts no session.
+  await page.getByTestId("signup-check-email").waitFor();
+  await logIn(page, { email, password });
 }
 
 export async function logIn(page, { email, password = "abcdef1234" }) {

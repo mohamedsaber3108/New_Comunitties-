@@ -12,6 +12,15 @@
 // (prefix "usam_test_"), so it cannot touch any pre-existing database.
 import crypto from "node:crypto";
 
+// Sign-up is neutral (202, no session), so tests sign up and then log in.
+// `req` is the file's own helper: (route, method, body, cookie) -> { status, body, cookie }.
+// Returns the login reply: { status: 200, body: { user }, cookie }.
+export async function signupLogin(req, body) {
+  const s = await req("/auth/signup", "POST", body);
+  if (s.status !== 202) return s;
+  return req("/auth/login", "POST", { email: body.email, password: body.password });
+}
+
 export async function prepareTestDatabase() {
   if (process.env.TEST_DB_DIALECT !== "postgres") return async () => {};
   const adminUrl = process.env.TEST_PG_ADMIN_URL;
