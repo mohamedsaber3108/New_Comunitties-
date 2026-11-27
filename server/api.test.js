@@ -63,6 +63,8 @@ test("account, community membership, feed and authorization persist", async () =
   });
   assert.equal(dup.status, 202, "an existing address gets the same reply (no 409)");
   assert.deepEqual(dup.body, first.body);
+  // The flag is a deployment setting, the same for both callers.
+  assert.equal(typeof first.body.emailVerification, "boolean");
   assert.equal(dup.cookie, undefined);
   assert.equal(await User.count({ where: { email: "demo@example.test" } }), 1);
   let signup = await request("/auth/login", "POST", {

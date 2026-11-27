@@ -657,7 +657,10 @@ app.post("/api/v1/auth/signup", async (req, res, next) => {
     if (!policy.ok) return fail(res, 400, "invalid_signup");
     // Neutral reply (no email enumeration): a new and an existing address get
     // the same 202 and no session. The member signs in after reading the mail.
-    const neutral = () => res.status(202).json({ ok: true, next: "check_email" });
+    // emailVerification is the same for every caller (a deployment setting),
+    // so the UI can say "sign in now" when no verification mail is sent.
+    const neutral = () =>
+      res.status(202).json({ ok: true, next: "check_email", emailVerification: config.requireEmailVerification });
     const existing = await User.findOne({ where: { email } });
     if (existing) {
       await hashPassword(password); // similar timing to a real sign-up

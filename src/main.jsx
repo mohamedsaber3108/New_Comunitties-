@@ -1435,7 +1435,8 @@ function Auth({ mode = "login", prompt, redirect }) {
       });
       if (result?.next === "check_email") {
         // Same reply for new and existing addresses (no email enumeration).
-        setSent(true);
+        // "verify" when the site sends a verification mail, else "signin".
+        setSent(result.emailVerification === false ? "signin" : "verify");
         return;
       }
       setUser(result.user);
@@ -1513,10 +1514,15 @@ function Auth({ mode = "login", prompt, redirect }) {
           {sent && (
             <div className="auth-sent" role="status" data-testid="signup-check-email">
               <p>
-                {L(
-                  "تحقّق من بريدك الإلكتروني لتكمل. إذا كان لديك حساب بهذا البريد، فسجّل الدخول أو أعد تعيين كلمة المرور.",
-                  "Check your email to continue. If you already have an account with this address, sign in or reset your password.",
-                )}
+                {sent === "signin"
+                  ? L(
+                      "تم. سجّل الدخول الآن بالبريد وكلمة المرور. إذا كان لديك حساب بهذا البريد من قبل، فسجّل الدخول بكلمة مرورك القديمة أو أعد تعيينها.",
+                      "Done. Sign in now with your email and password. If you already had an account with this address, sign in with your old password or reset it.",
+                    )
+                  : L(
+                      "تحقّق من بريدك الإلكتروني لتكمل. إذا كان لديك حساب بهذا البريد، فسجّل الدخول أو أعد تعيين كلمة المرور.",
+                      "Check your email to continue. If you already have an account with this address, sign in or reset your password.",
+                    )}
               </p>
               <p>
                 <Link className="button button-dark" to="/login">
