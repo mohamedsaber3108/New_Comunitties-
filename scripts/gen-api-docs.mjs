@@ -119,7 +119,7 @@ Internal details are never returned; unexpected faults are \`500 internal_error\
 
 **Rate limiting.** Responses include \`RateLimit-Limit\`, \`RateLimit-Remaining\`, \`RateLimit-Reset\`; a throttled call returns \`429\` with \`Retry-After\`. Limits (per IP unless noted): API 600/min · credential endpoints 30/15 min per IP+email · password-reset emails 3/hour per target address · verification emails 6/hour per user · writes 120/min per user · payment init 20/10 min per user. All are environment-tunable.
 
-**Pagination.** List endpoints are capped. Admin lists use \`?page=1&pageSize=25\` (max 100) and return \`{ items, page, pageSize, total, totalPages }\`. Feed/search/directory endpoints return the newest N items (feed 30, search 10 per type, members 50).
+**Pagination.** List endpoints are capped. Most admin lists use \`?page=1&pageSize=25\` (max 100) and return \`{ items, page, pageSize, total, totalPages }\`. Four admin queues use keyset paging instead (T-21): \`/admin/reports\` and \`/admin/contact\` (newest first), \`/admin/subscriptions\` (pending payments) and \`/admin/perk-applications\` (oldest first). They take \`?limit=1..100\` (default 50) and \`?cursor=<value from nextCursor>\`, return \`{ items, hasMore, nextCursor }\` with no total, and answer \`400 invalid_cursor\` to a bad cursor. They have no fixed cap. Feed/search/directory endpoints return the newest N items (feed 30, search 10 per type, members 50).
 
 **Idempotency.** \`POST /subscriptions\` for a paid plan **requires** an \`Idempotency-Key\` header (>= 12 chars). Replaying the same key returns the same subscription/payment attempt and reuses the provider order - it never creates a second charge.
 

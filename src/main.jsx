@@ -991,7 +991,10 @@ function useMorePages(base, first, refresh) {
   const key = `${base}|${refresh}`;
   const [more, setMore] = useState({ key: null, items: [], cursor: null });
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
+  // The error belongs to one list version, so a refresh clears it.
+  const [failed, setFailed] = useState({ key: null, msg: "" });
+  const error = failed.key === key ? failed.msg : "";
+  const setError = (msg) => setFailed({ key, msg });
   const statusRef = React.useRef(null);
   const fresh = more.key === key;
   const extra = fresh ? more.items : [];
@@ -6290,6 +6293,7 @@ function AdminPerksPanel({ refresh, setRefresh }) {
   const [, L] = useText();
   const { setToast } = useApp();
   const applications = useData("/admin/perk-applications", refresh);
+  const appList = useMorePages("/admin/perk-applications", applications.data, refresh);
   async function move(id, status) {
     try {
       await api(`/admin/perk-applications/${id}`, {
@@ -6306,8 +6310,9 @@ function AdminPerksPanel({ refresh, setRefresh }) {
     <Loadable loading={applications.loading} error={applications.error}>
       <div className="settings-form admin-perks-panel">
         <h2>{L("طلبات مزايا الأعضاء", "Member perk applications")}</h2>
-        {applications.data?.items?.length ? (
-          applications.data.items.map((item) => (
+        {appList.items.length ? (
+          <>
+          {appList.items.map((item) => (
             <div className="admin-row" key={item.id}>
               <div>
                 <strong>
@@ -6359,7 +6364,9 @@ function AdminPerksPanel({ refresh, setRefresh }) {
                 )}
               </div>
             </div>
-          ))
+          ))}
+          {loadMoreRow(appList, L)}
+          </>
         ) : (
           <Empty
             icon={Gift}
@@ -7516,7 +7523,8 @@ function AdminPage() {
     contacts = useData("/admin/contact", refresh),
     reportList = useMorePages("/admin/reports", reports.data, refresh),
     contactList = useMorePages("/admin/contact", contacts.data, refresh),
-    subscriptions = useData("/admin/subscriptions", refresh);
+    subscriptions = useData("/admin/subscriptions", refresh),
+    subscriptionList = useMorePages("/admin/subscriptions", subscriptions.data, refresh);
   const isAdminRole = ["admin", "super_admin"].includes(user.role);
   if (!isAdminRole && user.role !== "moderator")
     return (
@@ -7715,8 +7723,9 @@ function AdminPage() {
       {tab === "audit" && <AdminAuditPanel />}
       {tab === "subscriptions" && (
         <Loadable loading={subscriptions.loading} error={subscriptions.error}>
-          {subscriptions.data?.items?.length ? (
-            subscriptions.data.items.map((item) => (
+          {subscriptionList.items.length ? (
+            <>
+            {subscriptionList.items.map((item) => (
               <div className="admin-row" key={item.id}>
                 <div>
                   <strong>
@@ -7741,7 +7750,9 @@ function AdminPage() {
                   {L("طلب تفعيل (بعد تأكيد الدفع)", "Request activation (payment confirmed)")}
                 </button>
               </div>
-            ))
+            ))}
+            {loadMoreRow(subscriptionList, L)}
+            </>
           ) : (
             <Empty
               icon={CreditCard}

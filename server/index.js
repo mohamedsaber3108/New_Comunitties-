@@ -340,17 +340,26 @@ app.use("/api", withUser);
 // Keyset paging for long admin queues (T-21), newest first and stable when
 // rows share a timestamp: the cursor is "<createdAt ISO>|<id>" of the last row
 // shown. ?limit=1..100 (default 50). Returns { items, hasMore, nextCursor },
-// or null for a malformed cursor.
-async function keysetPage(Model, where, req) {
+// or null for a malformed cursor. opts.oldestFirst pages a first-come queue
+// (pending payments, perk applications) oldest first; opts.include is passed
+// to findAll.
+async function keysetPage(Model, where, req, opts = {}) {
   const PAGE = Math.min(100, Math.max(1, Number.parseInt(req.query.limit, 10) || 50));
+  const dir = opts.oldestFirst ? "ASC" : "DESC";
+  const past = opts.oldestFirst ? Op.gt : Op.lt;
   const w = { ...where };
   if (req.query.cursor) {
     const [iso, id] = String(req.query.cursor).split("|");
     const at = new Date(iso);
     if (Number.isNaN(at.getTime()) || !id || !UUID_RE.test(id)) return null;
-    w[Op.or] = [{ createdAt: { [Op.lt]: at } }, { createdAt: at, id: { [Op.lt]: id } }];
+    w[Op.or] = [{ createdAt: { [past]: at } }, { createdAt: at, id: { [past]: id } }];
   }
-  const rows = await Model.findAll({ where: w, order: [["createdAt", "DESC"], ["id", "DESC"]], limit: PAGE + 1 });
+  const rows = await Model.findAll({
+    where: w,
+    include: opts.include,
+    order: [["createdAt", dir], ["id", dir]],
+    limit: PAGE + 1,
+  });
   const hasMore = rows.length > PAGE;
   const items = rows.slice(0, PAGE);
   const last = items.at(-1);
@@ -4033,16 +4042,13 @@ app.patch("/api/v1/admin/perks/:id", auth, admin, async (req, res, next) => {
 });
 app.get("/api/v1/admin/perk-applications", auth, admin, async (req, res, next) => {
   try {
-    res.json({
-      items: await PerkApplication.findAll({
-        include: [
-          Perk,
-          { model: User, attributes: ["id", "name", "username", "email"] },
-        ],
-        order: [["createdAt", "ASC"]],
-        limit: 200,
-      }),
+    // T-21: oldest first, 50 a page, no silent cap at 200.
+    const page = await keysetPage(PerkApplication, {}, req, {
+      oldestFirst: true,
+      include: [Perk, { model: User, attributes: ["id", "name", "username", "email"] }],
     });
+    if (!page) return fail(res, 400, "invalid_cursor");
+    res.json(page);
   } catch (e) {
     next(e);
   }
@@ -4086,17 +4092,16 @@ app.patch(
 );
 app.get("/api/v1/admin/subscriptions", auth, admin, async (req, res, next) => {
   try {
-    const items = await Subscription.findAll({
-      where: { status: "pending_payment" },
-      include: [
-        { model: User, attributes: ["id", "name", "email"] },
-        { model: Plan },
-      ],
-      order: [["createdAt", "ASC"]],
-      limit: 100,
+    // T-21: oldest first, 50 a page, no silent cap at 100.
+    const page = await keysetPage(Subscription, { status: "pending_payment" }, req, {
+      oldestFirst: true,
+      include: [{ model: User, attributes: ["id", "name", "email"] }, { model: Plan }],
     });
+    if (!page) return fail(res, 400, "invalid_cursor");
     res.json({
-      items: items.map((x) => ({
+      hasMore: page.hasMore,
+      nextCursor: page.nextCursor,
+      items: page.items.map((x) => ({
         id: x.id,
         status: x.status,
         billingCycle: x.billingCycle,
