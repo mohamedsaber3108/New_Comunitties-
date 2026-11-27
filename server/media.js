@@ -26,8 +26,11 @@ const DAILY_UPLOAD_LIMIT = 40;
 export function prepareImage(dataUrl) {
   const match = String(dataUrl || "").match(DATA_URL_RE);
   if (!match) return { ok: false, error: "invalid_image" };
-  const mimeType = match[1];
   const raw = Buffer.from(match[2], "base64");
+  if (!raw.length) return { ok: false, error: "empty_file" };
+  // The declared type and any file name are ignored: the real bytes decide.
+  const mimeType = storage.sniffImageType(raw);
+  if (!mimeType) return { ok: false, error: "unsupported_image" };
   const check = storage.validateImage({ mimeType, size: raw.length, buffer: raw });
   if (!check.ok) return check;
   const buffer = storage.stripMetadata(mimeType, raw);

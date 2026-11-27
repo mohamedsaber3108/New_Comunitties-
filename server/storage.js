@@ -33,6 +33,11 @@ const SIGNATURES = {
   "image/webp": (b) => b.length > 12 && b.subarray(0, 4).toString("latin1") === "RIFF" && b.subarray(8, 12).toString("latin1") === "WEBP",
 };
 
+// Real type from the bytes (null if not an allowed image).
+export function sniffImageType(buffer) {
+  return Object.keys(SIGNATURES).find((m) => SIGNATURES[m](buffer)) || null;
+}
+
 export function validateImage({ mimeType, size, buffer }) {
   if (!IMAGE_TYPES[mimeType])
     return { ok: false, error: "unsupported_file_type" };
@@ -231,4 +236,4 @@ export function keyFromUrl(url) {
   return m ? m[1] : null;
 }
 
-export default { validateImage, storeObject, deleteObject, stripMetadata, imageSize, keyFromUrl };
+export default { sniffImageType, validateImage, storeObject, deleteObject, stripMetadata, imageSize, keyFromUrl };

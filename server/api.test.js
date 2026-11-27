@@ -5,7 +5,7 @@ import path from "node:path";
 import fs from "node:fs";
 process.env.NODE_ENV = "test";
 process.env.DB_DIALECT = process.env.TEST_DB_DIALECT || "sqlite";
-const { prepareTestDatabase } = await import("./test-support.js");
+const { prepareTestDatabase, signupLogin } = await import("./test-support.js");
 const dropTestDb = await prepareTestDatabase();
 // This suite exercises business logic with freshly signed-up users. Email
 // verification gating is covered explicitly in identity.test.js (gate ON).
@@ -46,13 +46,32 @@ after(async () => {
   fs.rmSync(temp, { recursive: true, force: true });
 });
 test("account, community membership, feed and authorization persist", async () => {
-  let signup = await request("/auth/signup", "POST", {
+  // Sign-up is neutral: 202, no session; the member then signs in.
+  const first = await request("/auth/signup", "POST", {
     name: "Demo Founder",
     email: "demo@example.test",
     password: "StrongPass123!",
     persona: "launchpad",
   });
-  assert.equal(signup.status, 201);
+  assert.equal(first.status, 202);
+  assert.equal(first.cookie, undefined);
+  const dup = await request("/auth/signup", "POST", {
+    name: "Someone Else",
+    email: "demo@example.test",
+    password: "StrongPass123!",
+    persona: "launchpad",
+  });
+  assert.equal(dup.status, 202, "an existing address gets the same reply (no 409)");
+  assert.deepEqual(dup.body, first.body);
+  // The flag is a deployment setting, the same for both callers.
+  assert.equal(typeof first.body.emailVerification, "boolean");
+  assert.equal(dup.cookie, undefined);
+  assert.equal(await User.count({ where: { email: "demo@example.test" } }), 1);
+  let signup = await request("/auth/login", "POST", {
+    email: "demo@example.test",
+    password: "StrongPass123!",
+  });
+  assert.equal(signup.status, 200);
   cookie = signup.cookie;
   assert.ok(cookie.startsWith("usam_session="));
   const forbidden = await request("/posts", "POST", {
@@ -70,18 +89,13 @@ test("account, community membership, feed and authorization persist", async () =
   const list = await request("/posts?community=launchpad");
   assert.equal(list.body.items.length, 1);
   assert.equal(list.body.items[0].body, "A real question for the community");
-  let signup2 = await request(
-    "/auth/signup",
-    "POST",
-    {
-      name: "Other Member",
-      email: "other@example.test",
-      password: "StrongPass123!",
-      persona: "studentzone",
-    },
-    null,
-  );
-  assert.equal(signup2.status, 201);
+  let signup2 = await signupLogin(request, {
+    name: "Other Member",
+    email: "other@example.test",
+    password: "StrongPass123!",
+    persona: "studentzone",
+  });
+  assert.equal(signup2.status, 200);
   cookie2 = signup2.cookie;
   const denied = await request(
     `/posts/${created.body.id}`,

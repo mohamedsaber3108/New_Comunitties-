@@ -139,6 +139,20 @@ export const templates = {
       text: `Reset your password: ${link} (expires in 1 hour).`,
     };
   },
+  signupAttemptExisting({ name, loginLink, resetLink }) {
+    const html = layout(
+      `<p>Hi ${esc(name)},</p>
+       <p>Someone tried to sign up for ${brand} with your email address. You already have an account, so nothing was created or changed.</p>
+       <p>If it was you, sign in or reset your password:</p>
+       <p style="margin:24px 0">${button(loginLink, "Sign in")} &nbsp; ${button(resetLink, "Reset password")}</p>
+       <p style="color:#8a8f98;font-size:13px">If it was not you, you can ignore this email.</p>`,
+    );
+    return {
+      subject: `Someone tried to sign up with your ${brand} email`,
+      html,
+      text: `Someone tried to sign up with your email address. You already have an account. Sign in: ${loginLink} or reset your password: ${resetLink}. If it was not you, ignore this email.`,
+    };
+  },
   passwordChanged({ name }) {
     const html = layout(
       `<p>Hi ${esc(name)},</p>

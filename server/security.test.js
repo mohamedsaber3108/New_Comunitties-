@@ -8,7 +8,7 @@ import path from "node:path";
 import fs from "node:fs";
 process.env.NODE_ENV = "test";
 process.env.DB_DIALECT = process.env.TEST_DB_DIALECT || "sqlite";
-const { prepareTestDatabase } = await import("./test-support.js");
+const { prepareTestDatabase, signupLogin } = await import("./test-support.js");
 const dropTestDb = await prepareTestDatabase();
 process.env.REQUIRE_EMAIL_VERIFICATION = "false";
 process.env.WORKER_ENABLED = "false";
@@ -37,7 +37,7 @@ async function req(route, method = "GET", body, who) {
   return { status: r.status, body: await r.json().catch(() => ({})), cookie: r.headers.get("set-cookie")?.split(";")[0], res: r };
 }
 async function signup(key) {
-  const r = await req("/auth/signup", "POST", { name: `Sec ${key}`, email: `${key}@example.test`, password: "abcdef1234", persona: "launchpad" });
+  const r = await signupLogin(req, { name: `Sec ${key}`, email: `${key}@example.test`, password: "abcdef1234", persona: "launchpad" });
   u[key] = { cookie: r.cookie, id: r.body.user.id, username: r.body.user.username, email: `${key}@example.test` };
 }
 
@@ -107,8 +107,8 @@ test("SQL injection strings are inert (parameterised queries)", async () => {
 });
 
 test("mass assignment: clients cannot grant themselves roles or verification", async () => {
-  const signupAttack = await req("/auth/signup", "POST", { name: "Evil Admin", email: "evil@example.test", password: "abcdef1234", persona: "launchpad", role: "super_admin", emailVerified: true, status: "active" });
-  assert.equal(signupAttack.status, 201);
+  const signupAttack = await signupLogin(req, { name: "Evil Admin", email: "evil@example.test", password: "abcdef1234", persona: "launchpad", role: "super_admin", emailVerified: true, status: "active" });
+  assert.equal(signupAttack.status, 200);
   assert.equal(signupAttack.body.user.role, "member");
   const evil = await User.findOne({ where: { email: "evil@example.test" } });
   assert.equal(evil.role, "member");

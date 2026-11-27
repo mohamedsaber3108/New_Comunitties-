@@ -8,7 +8,7 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 process.env.NODE_ENV = "test";
 process.env.DB_DIALECT = process.env.TEST_DB_DIALECT || "sqlite";
-const { prepareTestDatabase } = await import("./test-support.js");
+const { prepareTestDatabase, signupLogin } = await import("./test-support.js");
 const dropTestDb = await prepareTestDatabase();
 process.env.REQUIRE_EMAIL_VERIFICATION = "false";
 process.env.WORKER_ENABLED = "false";
@@ -50,7 +50,7 @@ before(async () => {
   server = app.listen(0, "127.0.0.1");
   await new Promise((r) => server.once("listening", r));
   base = `http://127.0.0.1:${server.address().port}`;
-  const signup = await req("/auth/signup", "POST", {
+  const signup = await signupLogin(req, {
     name: "Avatar Tester",
     email: "avatar@example.test",
     password: "abcdef1234",
@@ -146,15 +146,22 @@ test("content that lies about its type is rejected (HTML/SVG/script disguised as
   const disguises = [
     ["image/png", "<html><script>alert(document.cookie)</script></html>"],
     ["image/jpeg", "<?php system($_GET['c']); ?>"],
-    ["image/png", "GIF89a-but-declared-png-and-not-png-bytes....."],
+    ["image/png", "just some text renamed to photo.png"],
   ];
   for (const [mime, payload] of disguises) {
     const r = await req("/users/me/avatar", "POST", {
       image: `data:${mime};base64,` + Buffer.from(payload).toString("base64"),
     });
     assert.equal(r.status, 400, `${mime} disguise must be rejected`);
-    assert.equal(r.body.error, "invalid_image");
+    assert.equal(r.body.error, "unsupported_image");
   }
+});
+
+test("a real PNG passes even when declared as another image type", async () => {
+  const r = await req("/users/me/avatar", "POST", {
+    image: pngDataUrl(1500).replace("data:image/png;", "data:image/jpeg;"),
+  });
+  assert.equal(r.status, 200);
 });
 
 test("SVG (script-capable image format) is not an accepted avatar type", async () => {
@@ -166,7 +173,7 @@ test("SVG (script-capable image format) is not an accepted avatar type", async (
 });
 
 test("one member cannot overwrite or delete another member's avatar", async () => {
-  const other = await req("/auth/signup", "POST", {
+  const other = await signupLogin(req, {
     name: "Other", email: "other-avatar@example.test", password: "abcdef1234", persona: "launchpad",
   });
   const mine = await req("/users/me/avatar", "POST", { image: pngDataUrl(2000) });
@@ -212,7 +219,7 @@ test("post images: upload, attach to a post (max 4, own only), shown on the post
   }
   assert.equal((await req("/posts", "POST", { community: "launchpad", body: "five pics", imageIds: ids })).status, 400, "max 4");
   // Another member cannot attach my uploads.
-  const other = await req("/auth/signup", "POST", { name: "Thief", email: "thief@example.test", password: "abcdef1234", persona: "launchpad" });
+  const other = await signupLogin(req, { name: "Thief", email: "thief@example.test", password: "abcdef1234", persona: "launchpad" });
   await req("/communities/launchpad/join", "POST", undefined, other.cookie);
   const steal = await req("/posts", "POST", { community: "launchpad", body: "not mine", imageIds: [ids[0]] }, other.cookie);
   assert.equal(steal.status, 400);

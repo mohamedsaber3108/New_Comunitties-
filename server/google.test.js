@@ -169,7 +169,7 @@ test("state mismatch or a missing flow cookie is refused (login CSRF)", async ()
 
 test("an existing password account is linked by verified email; MFA accounts cannot use Google to bypass the code", async () => {
   const signup = await realFetch(`${base}/api/v1/auth/signup`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: "Pat Password", email: "pat@example.test", password: "abcdef1234", persona: "launchpad" }) });
-  assert.equal(signup.status, 201);
+  assert.equal(signup.status, 202);
   const f = await start();
   nextIdToken = signJwt(claims(f, { sub: "google-sub-pat", email: "PAT@example.test", name: "Pat" }));
   const r = await callback(f);

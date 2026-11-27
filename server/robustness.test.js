@@ -61,10 +61,15 @@ before(async () => {
   server = app.listen(0, "127.0.0.1");
   await new Promise((r) => server.once("listening", r));
   base = `http://127.0.0.1:${server.address().port}`;
-  const r = await fetch(base + "/api/v1/auth/signup", {
+  await fetch(base + "/api/v1/auth/signup", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name: "Root", email: "root@example.test", password: "abcdef1234", persona: "launchpad" }),
+  });
+  const r = await fetch(base + "/api/v1/auth/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email: "root@example.test", password: "abcdef1234" }),
   });
   cookie = r.headers.get("set-cookie").split(";")[0];
   await User.update({ role: "super_admin", emailVerified: true }, { where: { email: "root@example.test" } });
