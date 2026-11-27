@@ -95,6 +95,9 @@ async function api(url, options = {}) {
     headers: { "Content-Type": "application/json", ...headers },
   });
   const json = await r.json().catch(() => ({}));
+  // The server ended this session (staff idle or time limit, role change,
+  // suspension, expiry): tell the app so it can sign the tab out and say so.
+  if (r.status === 401 && json.error === "session_ended") window.dispatchEvent(new Event("usam:session-ended"));
   if (!r.ok) throw new Error(json.error || "request_failed");
   return json;
 }
@@ -268,9 +271,29 @@ function AppProvider({ children }) {
       .catch(() => {})
       .finally(() => setReady(true));
   }, []);
+  // When the server ends a signed-in session mid-use, sign this tab out and
+  // show a plain message instead of failing silently (UX judge, PR #5).
+  const userRef = React.useRef(null);
+  useEffect(() => {
+    userRef.current = user;
+  }, [user]);
+  useEffect(() => {
+    const onEnded = () => {
+      if (!userRef.current) return;
+      setUser(null);
+      setToast(
+        lang === "ar"
+          ? "انتهت جلستك. سجّل الدخول مرة أخرى للمتابعة."
+          : "Your session ended. Sign in again to continue.",
+      );
+    };
+    window.addEventListener("usam:session-ended", onEnded);
+    return () => window.removeEventListener("usam:session-ended", onEnded);
+  }, [lang]);
   useEffect(() => {
     if (toast) {
-      const id = setTimeout(() => setToast(""), 3800);
+      // Longer for the session-ended notice so it can be read.
+      const id = setTimeout(() => setToast(""), 6000);
       return () => clearTimeout(id);
     }
   }, [toast]);

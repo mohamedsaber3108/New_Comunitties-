@@ -333,8 +333,14 @@ test("A-03: role change signs the target out of every session", async () => {
   const target = await User.findOne({ where: { email: "rolechg@example.test" } });
   const r = await req(`/admin/users/${target.id}`, "PATCH", { action: "set_role", role: "moderator" }, superCookie);
   assert.equal(r.status, 200);
-  assert.equal((await req("/users/me/sessions", "GET", null, first)).status, 401);
+  // The old cookie now gets "session_ended" (so the UI can say so) and is cleared.
+  const ended = await req("/users/me/sessions", "GET", null, first);
+  assert.equal(ended.status, 401);
+  assert.equal(ended.body.error, "session_ended");
+  assert.equal(ended.cookie, "usam_session=");
   assert.equal((await req("/users/me/sessions", "GET", null, second)).status, 401);
+  // No cookie at all is still the plain "sign_in_required".
+  assert.equal((await req("/users/me/sessions", "GET")).body.error, "sign_in_required");
   assert.equal(await Session.count({ where: { UserId: target.id } }), 0);
   // The audit trail records the revoke with the session count; the acting admin stays signed in.
   const audit = await req("/admin/audit?pageSize=100", "GET", null, superCookie);
