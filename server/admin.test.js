@@ -336,6 +336,28 @@ test("A-03: role change signs the target out of every session", async () => {
   assert.equal((await req("/users/me/sessions", "GET", null, first)).status, 401);
   assert.equal((await req("/users/me/sessions", "GET", null, second)).status, 401);
   assert.equal(await Session.count({ where: { UserId: target.id } }), 0);
+  // The audit trail records the revoke with the session count; the acting admin stays signed in.
+  const audit = await req("/admin/audit?pageSize=100", "GET", null, superCookie);
+  assert.equal(audit.status, 200);
+  const row = audit.body.items.find((a) => a.action === "user_sessions_revoked" && /role:moderator/.test(JSON.stringify(a)));
+  assert.ok(row, "user_sessions_revoked audit row");
+  // 3 = the signup session plus the two logins above.
+  assert.match(row.details, /sessions:3/);
+  assert.equal((await req("/users/me/sessions", "GET", null, superCookie)).status, 200);
+});
+
+test("A-03: suspend revokes every session of a user with two logins", async () => {
+  await signup("susp2@example.test");
+  const a = await login("susp2@example.test");
+  const b = await login("susp2@example.test");
+  assert.equal((await req("/users/me/sessions", "GET", null, a)).status, 200);
+  assert.equal((await req("/users/me/sessions", "GET", null, b)).status, 200);
+  const target = await User.findOne({ where: { email: "susp2@example.test" } });
+  const r = await req(`/admin/users/${target.id}`, "PATCH", { action: "suspend", reason: "test" }, adminCookie);
+  assert.equal(r.status, 200);
+  assert.equal((await req("/users/me/sessions", "GET", null, a)).status, 401);
+  assert.equal((await req("/users/me/sessions", "GET", null, b)).status, 401);
+  assert.equal(await Session.count({ where: { UserId: target.id } }), 0);
 });
 
 test("A-03: staff idle and absolute limits apply; members are unaffected", async () => {
