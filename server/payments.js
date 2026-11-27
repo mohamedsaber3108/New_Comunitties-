@@ -403,12 +403,13 @@ export function registerPaymentRoutes(app, deps) {
         const amount = Number(req.body.amountEgp) || attempt.amountEgp;
         if (amount <= 0 || amount > attempt.amountEgp - attempt.refundedAmountEgp)
           return fail(res, 400, "invalid_refund_amount");
-        const out = await issueRefund(attempt, amount, req);
-        if (!out.ok) return fail(res, 502, out.error);
-        res.json({
-          ok: true,
-          refundedAmountEgp: out.refundedAmountEgp,
-          providerConfirmed: out.providerConfirmed,
+        // Two-person rule: this only files a request; a different admin
+        // approves it in /admin/approvals (server/approvals.js).
+        await deps.requestApproval(req, res, {
+          action: "refund_payment",
+          targetType: "payment_attempt",
+          targetId: attempt.id,
+          payload: { amountEgp: amount, paidEgp: attempt.amountEgp, memberId: attempt.UserId },
         });
       } catch (e) {
         next(e);
@@ -436,8 +437,14 @@ export function registerPaymentRoutes(app, deps) {
           return { ok: false, error: "provider_refund_rejected" };
         }
       } catch (err) {
-        logger.error("payments.refund_failed", { error: String(err), attemptId: attempt.id });
-        return { ok: false, error: "provider_refund_failed" };
+        logger.error("payments.refund_failed", { error: String(err), attemptId: attempt.id, paymobStatus: err?.paymobStatus });
+        // A clear 4xx answer means the provider refused: no money moved.
+        // A timeout, network error or 5xx is ambiguous: the refund may have
+        // gone through, so the caller must not retry it blindly.
+        const s = Number(err?.paymobStatus);
+        // 408 (request timeout) is a timeout, so it stays ambiguous.
+        if (s >= 400 && s < 500 && s !== 408) return { ok: false, error: "provider_refund_rejected" };
+        return { ok: false, error: "provider_unknown", ambiguous: true };
       }
     }
 
