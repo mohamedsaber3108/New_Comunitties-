@@ -1,0 +1,21 @@
+# Test fixtures and examples only. Reviewed in .usam-ops/reports/secret-scan.md (T-04).
+# test fixture: MFA key set inside a test
+d2530bd6ffc22d9c7234b03980c73711fb3632d7:server/google.test.js:generic-api-key:20
+# example: Idempotency-Key header in API docs
+f7bc609f065d6b9d9420ae9323a2f711da02bdd7:docs/API_DOCUMENTATION.md:generic-api-key:48
+# test config: e2e MFA key
+f7bc609f065d6b9d9420ae9323a2f711da02bdd7:playwright.config.js:generic-api-key:53
+# test script: reset-password URL in nginx integration check
+f7bc609f065d6b9d9420ae9323a2f711da02bdd7:scripts/nginx-integration.sh:generic-api-key:79
+# example: Idempotency-Key in docs generator text
+f7bc609f065d6b9d9420ae9323a2f711da02bdd7:scripts/gen-api-docs.mjs:generic-api-key:144
+# test fixture: Idempotency-Key
+f7bc609f065d6b9d9420ae9323a2f711da02bdd7:server/journey.test.js:generic-api-key:145
+# test fixture: MFA key
+f7bc609f065d6b9d9420ae9323a2f711da02bdd7:server/mfa.test.js:generic-api-key:15
+# test fixture: MFA key
+f7bc609f065d6b9d9420ae9323a2f711da02bdd7:server/robustness.test.js:generic-api-key:20
+# test fixture: Idempotency-Key
+f7bc609f065d6b9d9420ae9323a2f711da02bdd7:server/robustness.test.js:generic-api-key:100
+# test fixture: Idempotency-Key
+f7bc609f065d6b9d9420ae9323a2f711da02bdd7:server/robustness.test.js:generic-api-key:118
