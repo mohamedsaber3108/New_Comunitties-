@@ -1279,12 +1279,13 @@ function AppShell({ children }) {
         <button
           onClick={() => setDrawer(false)}
           className="icon-btn sidebar-close"
+          aria-label={L("أغلق القائمة", "Close menu")}
         >
           <X size={20} />
         </button>
       </div>
       <div className="side-group-label">{L("مساحتك", "YOUR SPACE")}</div>
-      <nav>
+      <nav aria-label={L("مساحتك", "Your space")}>
         {nav.map(([to, Icon, label]) => (
           <NavLink
             key={to}
@@ -1299,7 +1300,7 @@ function AppShell({ children }) {
         ))}
       </nav>
       <div className="side-group-label second">{L("حسابك", "ACCOUNT")}</div>
-      <nav>
+      <nav aria-label={L("حسابك", "Account")}>
         {personal.map(([to, Icon, label]) => (
           <NavLink
             key={to}
@@ -1373,7 +1374,7 @@ function AppShell({ children }) {
             USAM <span>/</span> {t.communities}
           </div>
           <div className="topbar-actions">
-            <Link to="/search" className="topbar-search">
+            <Link to="/search" className="topbar-search" aria-label={t.search}>
               <Search size={18} />
               <span>{t.search}</span>
               <kbd>⌘ K</kbd>
@@ -1894,7 +1895,7 @@ function Dashboard() {
               <span>
                 {x.done ? <Check size={18} /> : String(i + 1).padStart(2, "0")}
               </span>
-              <strong>{x.title}</strong>
+              <strong dir="auto">{x.title}</strong>
               <ArrowUpLeft size={16} />
             </Link>
           ))}
@@ -1984,7 +1985,7 @@ function Dashboard() {
             {events?.items?.length ? (
               events.items.slice(0, 2).map((e) => (
                 <Link className="tiny-event" to={`/events/${e.id}`} key={e.id}>
-                  {e.title}
+                  <bdi>{e.title}</bdi>
                   <small>{new Date(e.startsAt).toLocaleDateString()}</small>
                 </Link>
               ))
@@ -2067,6 +2068,7 @@ function PostList({ posts, onChange }) {
               <Link
                 to={`/members/${p.author?.username}`}
                 className="post-author"
+                dir="auto"
               >
                 {p.author?.name}
               </Link>
@@ -2090,7 +2092,7 @@ function PostList({ posts, onChange }) {
               </button>
             )}
           </div>
-          <Link to={`/posts/${p.id}`} className="post-body">
+          <Link to={`/posts/${p.id}`} className="post-body" dir="auto">
             {p.body}
           </Link>
           <PostImages images={p.images} />
@@ -2570,8 +2572,8 @@ function PostDetail() {
                         {c.author?.name?.charAt(0)}
                       </span>
                       <div>
-                        <strong>{c.author?.name}</strong>
-                        <p>{c.body}</p>
+                        <strong dir="auto">{c.author?.name}</strong>
+                        <p dir="auto">{c.body}</p>
                       </div>
                       {user &&
                         (user.id === c.author?.id ||
@@ -3034,7 +3036,7 @@ function EventDetail() {
                   · {e.timezone}
                 </span>
               </div>
-              <p>{e.description}</p>
+              <p dir="auto">{e.description}</p>
               <div className="event-properties">
                 <div>
                   <MapPin size={19} />
@@ -3145,7 +3147,7 @@ function MemberProfile() {
           <div className="profile-card">
             <AvatarImage person={person} />
             <h2>{person.name}</h2>
-            <p>{person.bio}</p>
+            <p dir="auto">{person.bio}</p>
             <span>
               <MapPin size={16} />
               {person.location || L("لم يحدد الموقع", "Location not listed")}
@@ -4322,7 +4324,7 @@ function Notifications() {
                     <Bell size={19} />
                   </span>
                   <span>
-                    <strong>{n.text}</strong>
+                    <strong dir="auto">{n.text}</strong>
                     <small>{new Date(n.createdAt).toLocaleString()}</small>
                   </span>
                   <ArrowUpLeft size={18} />
@@ -4416,7 +4418,7 @@ function SearchPage() {
             {data?.events?.map((e) => (
               <Link key={e.id} to={`/events/${e.id}`} className="search-item">
                 <CalendarDays size={19} />
-                {e.title}
+                <bdi>{e.title}</bdi>
                 <ArrowUpLeft size={16} />
               </Link>
             ))}
@@ -4603,7 +4605,7 @@ function ParticipationPage() {
                   </span>
                 </div>
                 <h2>{L(g.nameAr, g.nameEn)}</h2>
-                <p>{g.description}</p>
+                <p dir="auto">{g.description}</p>
                 <div className="directory-meta">
                   <span>
                     {g.Community?.nameEn} · {g.visibility}
@@ -4651,8 +4653,8 @@ function ParticipationPage() {
                   </span>
                   <span className="directory-index">CURATED ROOM</span>
                 </div>
-                <h2>{room.title}</h2>
-                <p>{room.description}</p>
+                <h2 dir="auto">{room.title}</h2>
+                <p dir="auto">{room.description}</p>
                 <div className="directory-meta">
                   <span>
                     {room.Community?.nameEn} · {room.capacity}{" "}
@@ -5119,7 +5121,7 @@ function OrganizationTeamCard({ org, onChanged }) {
             active.map((m) => (
               <div className="session-row" key={m.id}>
                 <div>
-                  <strong>{m.User?.name}</strong>
+                  <strong dir="auto">{m.User?.name}</strong>
                   <small>
                     @{m.User?.username} ·{" "}
                     {m.role === "admin" ? L("مسؤول", "Admin") : L("عضو", "Member")}
@@ -5734,7 +5736,7 @@ function AdminWorkflowPanel({ refresh, setRefresh }) {
         .map((m) => (
           <div className="admin-row" key={m.id}>
             <div>
-              <strong>{m.User?.name}</strong>
+              <strong dir="auto">{m.User?.name}</strong>
               <p>{L("طلب انضمام لمجموعة خاصة", "Private group request")}</p>
             </div>
             <div>
@@ -6142,7 +6144,7 @@ function AdminCouponsPanel() {
                   <span className={`status-pill ${c.active ? "active" : "canceled"}`}>
                     {c.active ? L("مفعّل", "Active") : L("موقوف", "Paused")}
                   </span>
-                  <p>{c.description}</p>
+                  <p dir="auto">{c.description}</p>
                   <small>
                     {describe(c)} · {L("الاستخدام", "Uses")} {c.uses}
                     {c.maxRedemptions ? `/${c.maxRedemptions}` : ""} · {L("مؤكد", "redeemed")} {c.redeemed} ·{" "}
@@ -6222,7 +6224,7 @@ function AdminEventsList({ refresh, setRefresh }) {
           data.items.map((ev) => (
             <div className="admin-row" key={ev.id}>
               <div>
-                <strong>{ev.title}</strong>
+                <strong dir="auto">{ev.title}</strong>
                 <small>
                   {new Date(ev.startsAt).toLocaleString()} · {ev.status} ·{" "}
                   {ev.registeredCount}/{ev.capacity} {L("مقعد", "seats")}
@@ -7765,7 +7767,7 @@ function AdminPage() {
             mentorsPending.data.items.map((m) => (
               <div className="admin-row" key={m.id}>
                 <div>
-                  <strong>{m.User?.name}</strong>
+                  <strong dir="auto">{m.User?.name}</strong>
                   <p>{m.expertise}</p>
                 </div>
                 <button
@@ -7833,7 +7835,7 @@ function AdminPage() {
                   <strong>
                     {c.name} · {c.topic}
                   </strong>
-                  <p>{c.message}</p>
+                  <p dir="auto">{c.message}</p>
                   <small>
                     {c.email} · {new Date(c.createdAt).toLocaleString()}
                   </small>
@@ -9143,11 +9145,11 @@ function MessagesPage() {
                 >
                   <span className="avatar">{c.other?.name?.charAt(0)}</span>
                   <span>
-                    <strong>{c.other?.name}</strong>
+                    <strong dir="auto">{c.other?.name}</strong>
                     {c.lastMessage && (
                       <small className="message-preview">
                         {c.lastMessage.mine ? L("أنت: ", "You: ") : ""}
-                        {c.lastMessage.body}
+                        <bdi>{c.lastMessage.body}</bdi>
                       </small>
                     )}
                     <small>{new Date(c.updatedAt).toLocaleString()}</small>
@@ -9187,7 +9189,7 @@ function MessagesPage() {
                     <span className="avatar">
                       {thread.data.other?.name?.charAt(0)}
                     </span>
-                    <strong>{thread.data.other?.name}</strong>
+                    <strong dir="auto">{thread.data.other?.name}</strong>
                     <button
                       className="icon-btn"
                       onClick={() => setRefresh((x) => x + 1)}
@@ -9213,7 +9215,7 @@ function MessagesPage() {
                           key={m.id}
                           className={`message-bubble ${m.SenderId === user.id ? "mine" : ""}`}
                         >
-                          <p>{m.body}</p>
+                          <p dir="auto">{m.body}</p>
                           <small>
                             {new Date(m.createdAt).toLocaleTimeString([], {
                               hour: "2-digit",
@@ -9280,8 +9282,8 @@ function ChallengeReview({ id }) {
         data.items.map((s) => (
           <div className="admin-row" key={s.id}>
             <div>
-              <strong>{s.User?.name}</strong>
-              <p>{s.body}</p>
+              <strong dir="auto">{s.User?.name}</strong>
+              <p dir="auto">{s.body}</p>
               <small>
                 {s.status} {s.feedback}
               </small>
@@ -9349,8 +9351,8 @@ function ChallengesPage() {
                   </span>
                   <span className="directory-index">{c.Community?.nameEn}</span>
                 </div>
-                <h2>{c.title}</h2>
-                <p>{c.description}</p>
+                <h2 dir="auto">{c.title}</h2>
+                <p dir="auto">{c.description}</p>
                 <div className="directory-meta">
                   <Clock size={15} />
                   {L("ينتهي", "Deadline")}{" "}
@@ -9410,7 +9412,7 @@ function ChallengeDetail() {
         <Loadable loading={loading} error={error}>
           {data?.item ? (
             <div className="event-detail">
-              <p>{data.item.description}</p>
+              <p dir="auto">{data.item.description}</p>
               <div className="event-properties">
                 <div>
                   <Users size={18} />
@@ -9497,7 +9499,7 @@ function MySubmissions() {
             >
               <div>
                 <strong>{s.Challenge?.title}</strong>
-                <p>{s.body}</p>
+                <p dir="auto">{s.body}</p>
                 <small>
                   {s.status} {s.feedback && `· ${s.feedback}`}
                 </small>
@@ -9560,8 +9562,8 @@ function MentorshipPage() {
               data.incoming.map((r) => (
                 <div className="admin-row" key={r.id}>
                   <div>
-                    <strong>{r.User?.name}</strong>
-                    <p>{r.message}</p>
+                    <strong dir="auto">{r.User?.name}</strong>
+                    <p dir="auto">{r.message}</p>
                     <small>{r.status}</small>
                   </div>
                   {r.status === "pending" && (
@@ -9587,8 +9589,8 @@ function MentorshipPage() {
               data.sent.map((r) => (
                 <div className="admin-row" key={r.id}>
                   <div>
-                    <strong>{r.Mentor?.User?.name}</strong>
-                    <p>{r.message}</p>
+                    <strong dir="auto">{r.Mentor?.User?.name}</strong>
+                    <p dir="auto">{r.message}</p>
                     <small>{r.status}</small>
                   </div>
                 </div>
