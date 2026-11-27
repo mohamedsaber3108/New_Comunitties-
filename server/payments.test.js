@@ -33,6 +33,7 @@ process.env.SQLITE_PATH = path.join(temp, "db.sqlite");
 const realFetch = globalThis.fetch;
 const paymobCalls = [];
 let nextTxnId = 9000;
+let refundMode = "ok"; // "ok" | "5xx" | "4xx" | "network"
 globalThis.fetch = async (url, init) => {
   const u = String(url);
   if (!u.startsWith("https://accept.paymob.com")) return realFetch(url, init);
@@ -43,8 +44,12 @@ globalThis.fetch = async (url, init) => {
   if (u.endsWith("/auth/tokens")) return json({ token: "auth-token" });
   if (u.endsWith("/ecommerce/orders")) return json({ id: 5000 + paymobCalls.length });
   if (u.endsWith("/acceptance/payment_keys")) return json({ token: "pay-key-" + body.order_id });
-  if (u.endsWith("/acceptance/void_refund/refund"))
+  if (u.endsWith("/acceptance/void_refund/refund")) {
+    if (refundMode === "5xx") return json({ message: "gateway_down" }, 503);
+    if (refundMode === "4xx") return json({ message: "refund_not_allowed" }, 400);
+    if (refundMode === "network") throw new TypeError("fetch failed");
     return json({ id: ++nextTxnId, success: true, is_refunded: true, amount_cents: body.amount_cents });
+  }
   return json({ message: "not_found" }, 404);
 };
 
@@ -303,6 +308,62 @@ test("refund approval: a failure AFTER the provider refund never reopens the req
   assert.equal(refundCalls(), before + 1);
   // super_admin sees it under needs_review; a plain admin does not.
   assert.equal((await req("/admin/approvals?status=needs_review", "GET", null, adminCookie)).status, 403);
+});
+
+test("refund approval: a provider timeout or 5xx is provider_unknown, goes to needs_review and blocks a new request", async () => {
+  for (const [i, mode] of ["5xx", "network"].entries()) {
+    const attempt = await paidAttemptFor(`unknown${i}@example.test`, `pay-key-0000000d${i}`);
+    const asked = await req(`/admin/payments/${attempt.id}/refund`, "POST", { amountEgp: 30, reason: "member asked for a refund" }, adminCookie);
+    assert.equal(asked.status, 201);
+    refundMode = mode;
+    let r;
+    try {
+      r = await req(`/admin/approvals/${asked.body.id}/approve`, "POST", {}, admin2Cookie);
+    } finally {
+      refundMode = "ok";
+    }
+    assert.equal(r.status, 502, mode);
+    assert.equal(r.body.error, "provider_unknown", mode);
+    const row = await ApprovalRequest.findByPk(asked.body.id);
+    assert.equal(row.status, "needs_review", mode);
+    assert.equal(row.executedAt, null);
+    assert.equal((await PaymentAttempt.findByPk(attempt.id)).refundedAmountEgp, 0, "nothing recorded locally");
+    // The same request cannot be approved again ...
+    const again = await req(`/admin/approvals/${asked.body.id}/approve`, "POST", {}, admin2Cookie);
+    assert.equal(again.status, 409);
+    assert.equal(again.body.error, "request_not_pending");
+    // ... and a new refund request for that payment is refused until reviewed.
+    const second = await req(`/admin/payments/${attempt.id}/refund`, "POST", { amountEgp: 30, reason: "try the refund once more" }, adminCookie);
+    assert.equal(second.status, 409);
+    assert.equal(second.body.error, "refund_review_pending");
+  }
+});
+
+test("refund approval: an approved row with no executedAt also blocks a new refund request", async () => {
+  const attempt = await paidAttemptFor("unexecuted@example.test", "pay-key-0000000e1");
+  const asked = await req(`/admin/payments/${attempt.id}/refund`, "POST", { amountEgp: 20, reason: "goodwill refund for outage" }, adminCookie);
+  assert.equal(asked.status, 201);
+  await ApprovalRequest.update({ status: "approved", executedAt: null }, { where: { id: asked.body.id } });
+  const second = await req(`/admin/payments/${attempt.id}/refund`, "POST", { amountEgp: 20, reason: "goodwill refund for outage" }, adminCookie);
+  assert.equal(second.status, 409);
+  assert.equal(second.body.error, "refund_review_pending");
+});
+
+test("refund approval: a clear provider 4xx refusal reopens the request (no money moved)", async () => {
+  const attempt = await paidAttemptFor("refused@example.test", "pay-key-0000000f1");
+  const asked = await req(`/admin/payments/${attempt.id}/refund`, "POST", { amountEgp: 25, reason: "member asked for a refund" }, adminCookie);
+  assert.equal(asked.status, 201);
+  refundMode = "4xx";
+  let r;
+  try {
+    r = await req(`/admin/approvals/${asked.body.id}/approve`, "POST", {}, admin2Cookie);
+  } finally {
+    refundMode = "ok";
+  }
+  assert.equal(r.status, 502);
+  assert.equal(r.body.error, "provider_refund_rejected");
+  assert.equal((await ApprovalRequest.findByPk(asked.body.id)).status, "pending");
+  assert.equal((await PaymentAttempt.findByPk(attempt.id)).refundedAmountEgp, 0);
 });
 
 test("refund approval: success sets executedAt; a changed paid amount is request_stale", async () => {

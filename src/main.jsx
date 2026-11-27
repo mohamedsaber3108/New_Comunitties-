@@ -6612,6 +6612,16 @@ function approvalErrorText(L, code) {
       note_required: L("اكتب ملاحظة الرفض", "Write a rejection note"),
       payment_confirmation_required: L("يجب تأكيد الدفع أولًا", "Payment must be confirmed first"),
       not_found: L("العنصر غير موجود", "Not found"),
+      refund_review_pending: L(
+        "يوجد طلب استرداد سابق لهذه العملية يحتاج مراجعة. لا يمكن تقديم طلب جديد قبل مراجعته",
+        "An earlier refund for this payment needs review. A new request is blocked until it is checked",
+      ),
+      request_review_pending: L("يوجد طلب سابق يحتاج مراجعة", "An earlier request for this target needs review"),
+      provider_unknown: L(
+        "لم يرد مزود الدفع بوضوح. قد يكون المبلغ قد رُد. وُضع الطلب للمراجعة؛ لا تعد المحاولة",
+        "The payment provider gave no clear answer. The money may have been refunded. The request was put up for review; do not retry",
+      ),
+      provider_refund_rejected: L("رفض مزود الدفع الاسترداد. لم يُرد أي مبلغ", "The payment provider refused the refund. No money moved"),
     }[code] || code
   );
 }
@@ -6619,36 +6629,75 @@ function approvalErrorText(L, code) {
 // open({ title, reasonLabel, amountLabel?, amountDefault?, submitLabel, onSubmit(reason, amount) }).
 // Focus goes into the first field, Esc closes, text fields use dir="auto" so
 // Arabic and English both work.
+// Modal focus rules shared by the admin dialogs: focus goes to `firstRef`
+// (or the dialog), Tab and Shift+Tab stay inside the dialog, Esc calls
+// setClosed(null), and focus returns to the element that opened it.
+// `setClosed` must be a stable state setter.
+const FOCUSABLE =
+  "button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [href], [tabindex]:not([tabindex=\"-1\"])";
+function useDialogFocus(isOpen, boxRef, firstRef, setClosed) {
+  useEffect(() => {
+    if (!isOpen) return undefined;
+    const opener = document.activeElement;
+    (firstRef.current || boxRef.current)?.focus();
+    const onKey = (e) => {
+      if (e.key === "Escape") {
+        setClosed(null);
+        return;
+      }
+      if (e.key !== "Tab" || !boxRef.current) return;
+      const items = [...boxRef.current.querySelectorAll(FOCUSABLE)];
+      if (!items.length) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      } else if (!boxRef.current.contains(document.activeElement)) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      if (opener && typeof opener.focus === "function" && document.contains(opener)) opener.focus();
+    };
+  }, [isOpen, boxRef, firstRef, setClosed]);
+}
 function useReasonDialog(L) {
   const [cfg, setCfg] = useState(null);
   const [reason, setReason] = useState("");
   const [amount, setAmount] = useState("");
+  const [busy, setBusy] = useState(false);
   const firstRef = React.useRef(null);
+  const boxRef = React.useRef(null);
   const close = () => setCfg(null);
   const open = (c) => {
     setReason("");
     setAmount(c.amountDefault ?? "");
+    setBusy(false);
     setCfg(c);
   };
-  const isOpen = !!cfg;
-  useEffect(() => {
-    if (!isOpen) return undefined;
-    firstRef.current?.focus();
-    const onKey = (e) => e.key === "Escape" && setCfg(null);
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [isOpen]);
+  useDialogFocus(!!cfg, boxRef, firstRef, setCfg);
   if (!cfg) return [null, open];
   const ok = reason.trim().length >= 10 && (cfg.amountLabel ? Number(amount) > 0 : true);
   const element = (
-    <div className="perk-apply-panel" role="dialog" aria-modal="true" aria-labelledby="reason-dialog-title">
+    <div className="perk-apply-panel" role="dialog" aria-modal="true" aria-labelledby="reason-dialog-title" ref={boxRef} tabIndex={-1}>
       <button type="button" className="perk-panel-scrim" aria-label={L("إغلاق", "Close")} onClick={close} />
       <form
-        onSubmit={(e) => {
+        onSubmit={async (e) => {
           e.preventDefault();
-          if (!ok) return;
-          close();
-          cfg.onSubmit(reason.trim(), Number(amount));
+          if (!ok || busy) return;
+          // The dialog stays open (and keeps the typed reason) when the
+          // request fails: onSubmit returns false on failure.
+          setBusy(true);
+          const done = await cfg.onSubmit(reason.trim(), Number(amount));
+          setBusy(false);
+          if (done !== false) close();
         }}
       >
         <h2 id="reason-dialog-title">{cfg.title}</h2>
@@ -6681,13 +6730,48 @@ function useReasonDialog(L) {
         </label>
         <small id="reason-dialog-hint">{L("10 أحرف على الأقل", "At least 10 characters")}</small>
         <div>
-          <button type="submit" disabled={!ok}>{cfg.submitLabel}</button>{" "}
+          <button type="submit" disabled={!ok || busy}>{cfg.submitLabel}</button>{" "}
           <button type="button" onClick={close}>{L("إلغاء", "Cancel")}</button>
         </div>
       </form>
     </div>
   );
   return [element, open];
+}
+// Confirm step before an irreversible admin action. Returns [element, ask].
+// ask({ title, lines: [text], confirmLabel, onConfirm }). Same focus rules
+// as the reason dialog; Esc or Cancel does nothing.
+function useConfirmDialog(L) {
+  const [cfg, setCfg] = useState(null);
+  const boxRef = React.useRef(null);
+  const cancelRef = React.useRef(null);
+  useDialogFocus(!!cfg, boxRef, cancelRef, setCfg);
+  if (!cfg) return [null, setCfg];
+  const element = (
+    <div className="perk-apply-panel" role="alertdialog" aria-modal="true" aria-labelledby="confirm-dialog-title" aria-describedby="confirm-dialog-body" ref={boxRef} tabIndex={-1}>
+      <button type="button" className="perk-panel-scrim" aria-label={L("إغلاق", "Close")} onClick={() => setCfg(null)} />
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          const run = cfg.onConfirm;
+          setCfg(null);
+          run();
+        }}
+      >
+        <h2 id="confirm-dialog-title">{cfg.title}</h2>
+        <div id="confirm-dialog-body">
+          {cfg.lines.map((line, i) => (
+            <p key={i} dir="auto">{line}</p>
+          ))}
+        </div>
+        <div>
+          <button type="submit">{cfg.confirmLabel}</button>{" "}
+          <button type="button" ref={cancelRef} onClick={() => setCfg(null)}>{L("إلغاء", "Cancel")}</button>
+        </div>
+      </form>
+    </div>
+  );
+  return [element, setCfg];
 }
 // --- Admin: payment ledger, refunds, reconciliation ------------------------
 function AdminPaymentsPanel() {
@@ -6714,8 +6798,10 @@ function AdminPaymentsPanel() {
         ),
       );
       setRefresh((x) => x + 1);
+      return true;
     } catch (e) {
       setToast(approvalErrorText(L, e.message));
+      return false;
     }
   }
   async function reconcile(p) {
@@ -6802,6 +6888,7 @@ function AdminApprovalsPanel() {
   const [rejecting, setRejecting] = useState(null);
   const [note, setNote] = useState("");
   const [review, setReview] = useState(false);
+  const [confirmDialog, askConfirm] = useConfirmDialog(L);
   const isSuper = currentUser.role === "super_admin";
   const { data, loading, error } = useData(`/admin/approvals${review ? "?status=needs_review" : ""}`, refresh);
   // Move focus into the note field when it opens.
@@ -6827,11 +6914,28 @@ function AdminApprovalsPanel() {
     a === "activate_subscription" ? L("تفعيل اشتراك", "Activate subscription") : L("استرداد مبلغ", "Refund payment");
   const age = (d) => {
     const h = Math.max(0, Math.floor((now - new Date(d).getTime()) / 3600000));
-    return h < 1 ? L("أقل من ساعة", "under 1 hour") : L(`${h} ساعة`, `${h} h`);
+    if (h < 1) return L("أقل من ساعة", "under 1 hour");
+    // Arabic number agreement: 1 ساعة واحدة, 2 ساعتان, 3-10 ساعات, 11+ ساعة.
+    const ar = h === 1 ? "ساعة واحدة" : h === 2 ? "ساعتان" : h <= 10 ? `${h} ساعات` : `${h} ساعة`;
+    return L(ar, h === 1 ? "1 hour" : `${h} hours`);
   };
+  const askApprove = (item) =>
+    askConfirm({
+      title: L("تأكيد الموافقة", "Confirm approval"),
+      lines: [
+        `${actionName(item.action)}${item.payload?.amountEgp ? ` · ${formatEgp(item.payload.amountEgp, lang)}` : ""}${item.payload?.planCode ? ` · ${item.payload.planCode}` : ""}`,
+        `${L("الهدف", "Target")}: ${item.targetType} ${item.targetId.slice(0, 8)}`,
+        item.action === "refund_payment"
+          ? L("سيُرد المبلغ للعضو عبر مزود الدفع. لا يمكن التراجع.", "The money goes back to the member through the payment provider. This cannot be undone.")
+          : L("سيُفعّل الاشتراك المدفوع فورًا.", "The paid subscription becomes active now."),
+      ],
+      confirmLabel: L("نعم، وافق", "Yes, approve"),
+      onConfirm: () => decide(item, "approve"),
+    });
   return (
     <div className="settings-form">
       <h2>{L("الموافقات", "Approvals")}</h2>
+      {confirmDialog}
       <p className="muted">
         {L(
           "كل تفعيل يدوي أو استرداد يحتاج موافقة مشرف آخر غير صاحب الطلب.",
@@ -6907,7 +7011,7 @@ function AdminApprovalsPanel() {
                 )}
               </div>
               <div className="admin-perk-actions">
-                <button disabled={blocked || item.status !== "pending"} aria-describedby={blocked ? `appr-why-${item.id}` : undefined} onClick={() => decide(item, "approve")}>
+                <button disabled={blocked || item.status !== "pending"} aria-describedby={blocked ? `appr-why-${item.id}` : undefined} onClick={() => askApprove(item)}>
                   {L("موافقة", "Approve")}
                 </button>
                 <button disabled={blocked || item.status !== "pending"} aria-describedby={blocked ? `appr-why-${item.id}` : undefined} onClick={() => { setRejecting(item.id); setNote(""); }}>
@@ -7363,8 +7467,10 @@ function AdminPage() {
           "Request sent. A different super admin must approve it in the Approvals tab",
         ),
       );
+      return true;
     } catch (e) {
       setToast(approvalErrorText(L, e.message));
+      return false;
     }
   }
   return (

@@ -437,8 +437,13 @@ export function registerPaymentRoutes(app, deps) {
           return { ok: false, error: "provider_refund_rejected" };
         }
       } catch (err) {
-        logger.error("payments.refund_failed", { error: String(err), attemptId: attempt.id });
-        return { ok: false, error: "provider_refund_failed" };
+        logger.error("payments.refund_failed", { error: String(err), attemptId: attempt.id, paymobStatus: err?.paymobStatus });
+        // A clear 4xx answer means the provider refused: no money moved.
+        // A timeout, network error or 5xx is ambiguous: the refund may have
+        // gone through, so the caller must not retry it blindly.
+        const s = Number(err?.paymobStatus);
+        if (s >= 400 && s < 500) return { ok: false, error: "provider_refund_rejected" };
+        return { ok: false, error: "provider_unknown", ambiguous: true };
       }
     }
 

@@ -23,6 +23,17 @@ export function registerApprovalRoutes(app, deps) {
   deps.requestApproval = async (req, res, { action, targetType, targetId, payload }) => {
     const reason = text(req.body?.reason);
     if (reason.length < 10 || reason.length > 500) return fail(res, 400, "reason_required");
+    // An earlier request for the same target that may already have acted
+    // (needs_review, or approved without executedAt) blocks a new one.
+    const unresolved = await ApprovalRequest.findOne({
+      where: {
+        action,
+        targetId: String(targetId),
+        [Op.or]: [{ status: "needs_review" }, { status: "approved", executedAt: null }],
+      },
+    });
+    if (unresolved)
+      return fail(res, 409, action === "refund_payment" ? "refund_review_pending" : "request_review_pending");
     const dup = await ApprovalRequest.findOne({
       where: { action, targetId: String(targetId), status: "pending", expiresAt: { [Op.gt]: new Date() } },
     });
@@ -202,6 +213,15 @@ export function registerApprovalRoutes(app, deps) {
           logger.error("approvals.needs_review_mark_failed", { requestId: r.id, error: String(e2) }),
         );
         throw e;
+      }
+      if (!out.ok && out.error === "provider_unknown") {
+        // Ambiguous provider answer (timeout, network, 5xx): money may have
+        // moved, so never reopen. A super_admin checks it by hand.
+        logger.error("approvals.refund_provider_unknown", { requestId: r.id, attemptId: attempt.id });
+        await ApprovalRequest.update({ status: "needs_review" }, { where: { id: r.id } }).catch((e2) =>
+          logger.error("approvals.needs_review_mark_failed", { requestId: r.id, error: String(e2) }),
+        );
+        return fail(res, 502, "provider_unknown");
       }
       if (!out.ok) return await undo(), fail(res, 502, out.error);
       // Money moved. From here nothing may undo the request.
