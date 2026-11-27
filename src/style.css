@@ -5062,9 +5062,11 @@ strong {
 
 /* T-15: Arabic letters join, so any letter-spacing (the tight negative
    heading values or the wide label values above) breaks the words apart.
-   In Arabic the whole UI uses normal spacing; English keeps its design. */
-html[lang="ar"] *,
-html[lang="ar"] *::before,
-html[lang="ar"] *::after {
+   In Arabic the whole UI uses normal spacing; English keeps its design.
+   Latin brand words in the Arabic UI lose their wide tracking too (UX judge
+   to confirm); key caps (kbd) keep theirs. */
+html[lang="ar"] *:not(kbd),
+html[lang="ar"] *:not(kbd)::before,
+html[lang="ar"] *:not(kbd)::after {
   letter-spacing: normal !important;
 }
