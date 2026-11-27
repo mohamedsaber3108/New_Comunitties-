@@ -1,16 +1,19 @@
 # Integration status
 
-| System | Current behavior | Status |
-|---|---|---|
-| USAM Education | external link only | live link; account/data integration blocked |
-| USAM Career & Jobs | external link; jobs remain source of truth | live link; deep link and SSO blocked |
-| USAM Freelancing | external link only | live link; API integration blocked |
-| Existing Hub repository | unavailable in this workspace | merge/migration blocked |
-| Unified USAM SSO | no provider contract or credentials | blocked |
-| NomadAI / Bedrock | no provider contract, guardrails or budget | blocked; no AI façade displayed |
-| Payments and paid events | rejected by API | blocked pending gateway and reconciliation |
-| SES and S3 | no credentials/verified sender/bucket | blocked; no email or upload claims |
-| Redis and Socket.IO | Redis development container defined but not consumed | absent |
-| AWS RDS / EC2 / DNS | runbook supplied; no infrastructure touched | unverified, deployment pending separate authorization |
+Updated 2026-11-27 to match main (`28f5fd8`) and `docs/FINAL_PRODUCT_REPORT.md` s.3 and s.9.
 
-No external messages are sent by this package. It does not read or modify the protected Education instance.
+| System | Current behaviour in code | Status |
+|---|---|---|
+| USAM Education, Career & Jobs, Freelancing | external links only; Jobs stays the source of truth for jobs | live links; single sign-on and data sharing not built |
+| Unified USAM sign-on | none | blocked: no provider contract |
+| Paymob (cards, refunds, reconciliation) | adapter in `server/paymob.js`, HMAC-verified webhooks, refunds, reconciliation; tested against a stub only | off until merchant keys exist (`PAYMOB_ENABLED=false`) |
+| Email (SES or SMTP) | durable outbox and templates; `EMAIL_PROVIDER=console` only logs | needs a verified sender and a branded domain |
+| Google sign-in (OIDC + PKCE) | built in `server/google.js`; tested against a stub | needs an OAuth client |
+| S3 storage and off-host backups | optional driver in `server/storage.js`; local disk by default | needs a bucket and an IAM role |
+| Realtime | Server-Sent Events from `server/realtime.js`, one process | live; multi-server needs a shared store (plan T-12) |
+| Redis | not used by the code | not needed today |
+| AI assistant (NomadAI / Bedrock) | none shipped | blocked: owner decision on provider, privacy and budget |
+| AWS hosting | systemd + Nginx scripts in `deploy/` | live host "Hub"; deploys follow the owner deploy batch |
+| Old USAM Hub site on the same host | separate repo, not touched by this code | owner decision |
+
+No outside messages are sent unless an email provider is configured.

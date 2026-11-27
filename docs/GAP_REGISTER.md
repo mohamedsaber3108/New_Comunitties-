@@ -1,27 +1,19 @@
-# Gap register — evidence based
+# Gap register
 
-The attached material contained blueprints and earlier Kiro transcripts, but **no current source repository, git history, approved screenshots, credentials or production access**. This standalone implementation cannot preserve or repair unseen existing Hub code. Historical test counts and vulnerability reports are not treated as current evidence.
+Updated 2026-11-27 to match main (`28f5fd8`). Earlier versions of this file described a much smaller build and no longer apply. Feature status in detail: `docs/FINAL_PRODUCT_REPORT.md` and `docs/FRONTEND_BACKEND_INTEGRATION_MATRIX.md`.
 
-| Area | Status in this package | Next proof or dependency |
+| Area | Built today | Still missing |
 |---|---|---|
-| Public design, four persona pages, AR/EN, light/dark, responsive CSS | implemented; local browser checked on representative desktop pages | compare to approved source/screenshots, full keyboard/mobile/contrast check |
-| Accounts and sessions | partial | SSO, verification, recovery, MFA, durable rate limit |
-| Official communities and membership | implemented baseline | current Hub merge, roles, group permissions |
-| Feed and social | partial: posts and author edit UI, comments, reactions, bookmarks, following and blocks | media, rich posts, mute, stronger moderation, pagination |
-| Events | free RSVP implemented | organizer workflow, check-in, QR, paid ticket provider |
-| Challenges | text submissions and admin review implemented | stages, judges, files, appeals, certificates |
-| Mentorship | reviewed profiles and requests implemented | scheduling, session lifecycle, calendar and trust evidence |
-| Organizations | submit/approve directory implemented | verified reps, team roles, tenancy, partnerships |
-| Offers | limited claim and optional code implemented | issuer verification, eligibility, redemption proof and partner analytics |
-| Messages / realtime / Redis queues | consent-based persisted messages implemented; realtime absent | Socket.IO, Redis, read receipts UI, pagination, harassment and abuse controls |
-| Notifications | in-app subset implemented | SES, preferences, queues and delivery logs |
-| Search | basic public text search | relevance, privacy-tested indexing, filters, pagination |
-| Guides, FAQ, onboarding, activity and support | eight bilingual guides, FAQ, member checklist/activity/events, contact queue | editorial review, scalable support operations and eventual email workflow |
-| AI / NomadAI | blocked | provider contract, credentials, privacy and budget controls |
-| Billing, freemium and paid tickets | blocked | gateway selection and compliance |
-| Education/Career/Freelancing/Jobs data integration | blocked | API/SSO contracts; Jobs remains external source of truth |
-| Production schema migration | absent | versioned migrations and reconcile existing data, no production writes |
-| CI/browser E2E/observability | partial | isolated MySQL tests, browser runner, monitoring and backup drill |
-| EC2/RDS/SES/S3/DNS | not touched | infrastructure approval and verified deployment |
-
-Status never means the full 426-line master blueprint has been completed. See its original text in `docs/source/MASTER_BLUEPRINT.md`.
+| Design, AR/EN, light/dark, responsive | yes; lint gate with jsx-a11y (baseline of warnings) | formal WCAG audit, screen-reader test, per-post text direction (plan T-11, T-15) |
+| Accounts and sessions | verification, reset, sessions list, TOTP MFA, Google code, shorter staff sessions, neutral sign-up reply | real email delivery, CAPTCHA (deferred), live Google client |
+| Roles and admin | member/moderator/admin/super_admin, users, plans, coupons, CMS, flags, audit log | two-person approvals (open PR #6), group-scoped moderators, employee bundles, appeals |
+| Communities and feed | posts, images, comments, reactions, bookmarks, follows, blocks, reports, cursor paging | rich editor, mutes, bans and appeals, paging on every long list (plan T-21) |
+| Events | free with waitlist, paid tickets, check-in, cancel with refunds | paid leg needs Paymob |
+| Mentorship | reviewed profiles and requests | scheduling and booking (plan T-17, waits on the paid decision) |
+| Organizations | submit, approve, team roles, analytics | tenancy, verified representatives |
+| Messages and realtime | consent-based messages, read receipts, SSE notifications | multi-server realtime (plan T-12) |
+| Billing | plans, subscriptions, coupons with a 40% cap (open PR #9), billing history | live payments (Paymob keys), EGP/SAR display rules (plan P-03) |
+| AI assistant | none | owner decision |
+| Data | migrations 0001-0006, backups before every deploy, export, 30-day purge after deletion | off-host backups, restore drill on staging |
+| CI | secret scan, lint, builds, API-docs check, tests on SQLite and PostgreSQL, npm audit, browser tests | branch protection (owner setting) |
+| Hosting | deploy, rollback, backup and health scripts | staging host, alerts that reach a person (plan T-06, T-07) |
