@@ -7514,7 +7514,8 @@ function AdminPage() {
     contacts = useData("/admin/contact", refresh),
     reportList = useMorePages("/admin/reports", reports.data, refresh),
     contactList = useMorePages("/admin/contact", contacts.data, refresh),
-    subscriptions = useData("/admin/subscriptions", refresh);
+    subscriptions = useData("/admin/subscriptions", refresh),
+    subscriptionList = useMorePages("/admin/subscriptions", subscriptions.data, refresh);
   const isAdminRole = ["admin", "super_admin"].includes(user.role);
   if (!isAdminRole && user.role !== "moderator")
     return (
@@ -7713,8 +7714,9 @@ function AdminPage() {
       {tab === "audit" && <AdminAuditPanel />}
       {tab === "subscriptions" && (
         <Loadable loading={subscriptions.loading} error={subscriptions.error}>
-          {subscriptions.data?.items?.length ? (
-            subscriptions.data.items.map((item) => (
+          {subscriptionList.items.length ? (
+            <>
+            {subscriptionList.items.map((item) => (
               <div className="admin-row" key={item.id}>
                 <div>
                   <strong>
@@ -7739,7 +7741,9 @@ function AdminPage() {
                   {L("طلب تفعيل (بعد تأكيد الدفع)", "Request activation (payment confirmed)")}
                 </button>
               </div>
-            ))
+            ))}
+            {loadMoreRow(subscriptionList, L)}
+            </>
           ) : (
             <Empty
               icon={CreditCard}
