@@ -1,6 +1,6 @@
 # USAM Communities
 
-React/Vite frontend and Express/Sequelize API for USAM Communities. Updated 2026-11-27 (main `28f5fd8`). The live host ("Hub") ran `1ae4b17` when last read on 2026-11-26, so it is behind this code.
+React/Vite frontend and Express/Sequelize API for USAM Communities. Updated 2026-11-27 to match the code on main. The live host may run an older release; check its version before relying on any feature below.
 
 ## What the code does today
 
@@ -39,7 +39,7 @@ npm run docs:api       # regenerate docs/API_DOCUMENTATION.md from the router
 npm run db:migrate     # apply migrations (server/migrations)
 ```
 
-CI (`.github/workflows/check.yml`) runs a full-history secret scan, lint, both builds, the API-docs check, the server tests on SQLite and PostgreSQL, `npm audit` for production dependencies, and the browser tests. Counts change with every PR; read the latest CI run instead of a number in a document.
+CI (`.github/workflows/check.yml`) runs a full-history secret scan, lint, both builds, the API-docs check, a shell-script syntax check, the server tests on SQLite and PostgreSQL, `npm audit` for production dependencies, and the browser tests. Counts change with every PR; read the latest CI run instead of a number in a document.
 
 ## Read next
 
