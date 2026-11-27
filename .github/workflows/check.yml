@@ -12,8 +12,9 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+          persist-credentials: false
       - name: Secret scan over full git history (redacted)
-        run: docker run --rm -v ${{ github.workspace }}:/repo zricethezav/gitleaks:v8.24.2 git /repo --redact --verbose --exit-code 1
+        run: docker run --rm -v ${{ github.workspace }}:/repo ghcr.io/gitleaks/gitleaks:v8.24.2 git /repo --redact --verbose --exit-code 1
   verify:
     runs-on: ubuntu-24.04
     services:
@@ -29,11 +30,15 @@ jobs:
           --health-timeout 5s --health-retries 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '24'
           cache: npm
       - run: npm ci
+      - name: Lint (ESLint + jsx-a11y, no new warnings)
+        run: npm run lint
       - name: Production build (real API) and preview build
         run: npm run build:ec2 && npm run build
       - name: API documentation matches the live router
@@ -54,6 +59,8 @@ jobs:
     needs: [verify, secrets]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '24'
