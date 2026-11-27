@@ -194,7 +194,14 @@ test.describe.serial("member journey through the real UI", () => {
     await zone.getByLabel("Password").fill(newPassword);
     await submit.click();
     await page.waitForURL((u) => u.pathname === "/");
-    await page.goto("/login");
+    // The sign-out after deletion can still trigger one more redirect to "/".
+    // Let it settle, then open the login page (a goto during that redirect
+    // was "interrupted by another navigation" on CI).
+    await page.waitForLoadState("networkidle");
+    await expect(async () => {
+      await page.goto("/login");
+      await expect(page.getByLabel("Email address")).toBeVisible({ timeout: 2000 });
+    }).toPass({ timeout: 15000 });
     await page.getByLabel("Email address").fill(email);
     await page.getByLabel("Password").fill(newPassword);
     await page.locator("button.auth-submit").click();
