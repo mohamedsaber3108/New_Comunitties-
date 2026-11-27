@@ -6596,10 +6596,104 @@ function AdminPlansPanel({ refresh, setRefresh }) {
     </Loadable>
   );
 }
+// Arabic + English text for the two-person approval error codes.
+function approvalErrorText(L, code) {
+  return (
+    {
+      reason_required: L("اكتب سببًا لا يقل عن 10 أحرف", "Write a reason of at least 10 characters"),
+      request_stale: L("تغيّرت البيانات منذ تقديم الطلب. قدّم طلبًا جديدًا", "The data changed since the request was made. File a new request"),
+      attempt_not_refundable: L("هذه العملية غير قابلة للاسترداد", "This payment cannot be refunded"),
+      invalid_refund_amount: L("مبلغ الاسترداد غير صالح", "The refund amount is not valid"),
+      request_already_pending: L("يوجد طلب معلق لنفس الهدف", "A request for this target is already pending"),
+      self_approval_forbidden: L("لا يمكنك قرار طلب قدمته أنت", "You cannot decide a request you made yourself"),
+      super_admin_required: L("هذا الطلب يحتاج مشرفًا أعلى", "This request needs a super admin"),
+      request_expired: L("انتهت مهلة الطلب", "This request has expired"),
+      request_not_pending: L("تم البت في الطلب بالفعل", "This request was already decided"),
+      note_required: L("اكتب ملاحظة الرفض", "Write a rejection note"),
+      payment_confirmation_required: L("يجب تأكيد الدفع أولًا", "Payment must be confirmed first"),
+      not_found: L("العنصر غير موجود", "Not found"),
+    }[code] || code
+  );
+}
+// Labelled reason dialog (replaces window.prompt). Returns [element, open].
+// open({ title, reasonLabel, amountLabel?, amountDefault?, submitLabel, onSubmit(reason, amount) }).
+// Focus goes into the first field, Esc closes, text fields use dir="auto" so
+// Arabic and English both work.
+function useReasonDialog(L) {
+  const [cfg, setCfg] = useState(null);
+  const [reason, setReason] = useState("");
+  const [amount, setAmount] = useState("");
+  const firstRef = React.useRef(null);
+  const close = () => setCfg(null);
+  const open = (c) => {
+    setReason("");
+    setAmount(c.amountDefault ?? "");
+    setCfg(c);
+  };
+  const isOpen = !!cfg;
+  useEffect(() => {
+    if (!isOpen) return undefined;
+    firstRef.current?.focus();
+    const onKey = (e) => e.key === "Escape" && setCfg(null);
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [isOpen]);
+  if (!cfg) return [null, open];
+  const ok = reason.trim().length >= 10 && (cfg.amountLabel ? Number(amount) > 0 : true);
+  const element = (
+    <div className="perk-apply-panel" role="dialog" aria-modal="true" aria-labelledby="reason-dialog-title">
+      <button type="button" className="perk-panel-scrim" aria-label={L("إغلاق", "Close")} onClick={close} />
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (!ok) return;
+          close();
+          cfg.onSubmit(reason.trim(), Number(amount));
+        }}
+      >
+        <h2 id="reason-dialog-title">{cfg.title}</h2>
+        {cfg.amountLabel && (
+          <label>
+            {cfg.amountLabel}
+            <input
+              ref={firstRef}
+              type="number"
+              min="1"
+              dir="ltr"
+              value={amount}
+              onChange={(e) => setAmount(e.target.value)}
+              required
+            />
+          </label>
+        )}
+        <label>
+          {cfg.reasonLabel}
+          <textarea
+            ref={cfg.amountLabel ? undefined : firstRef}
+            dir="auto"
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            minLength={10}
+            maxLength={500}
+            required
+            aria-describedby="reason-dialog-hint"
+          />
+        </label>
+        <small id="reason-dialog-hint">{L("10 أحرف على الأقل", "At least 10 characters")}</small>
+        <div>
+          <button type="submit" disabled={!ok}>{cfg.submitLabel}</button>{" "}
+          <button type="button" onClick={close}>{L("إلغاء", "Cancel")}</button>
+        </div>
+      </form>
+    </div>
+  );
+  return [element, open];
+}
 // --- Admin: payment ledger, refunds, reconciliation ------------------------
 function AdminPaymentsPanel() {
   const [, L] = useText();
   const { setToast, lang } = useApp();
+  const [dialog, openDialog] = useReasonDialog(L);
   const [page, setPage] = useState(1);
   const [status, setStatus] = useState("");
   const [refresh, setRefresh] = useState(0);
@@ -6607,20 +6701,11 @@ function AdminPaymentsPanel() {
     `/admin/payments?page=${page}${status ? `&status=${status}` : ""}`,
     refresh,
   );
-  async function refund(p) {
-    const raw = window.prompt(
-      L("مبلغ الاسترداد (ج.م)", "Refund amount (EGP)"),
-      String(p.amountEgp - p.refundedAmountEgp),
-    );
-    if (!raw) return;
-    const reason = window.prompt(
-      L("سبب الاسترداد (10 أحرف على الأقل)", "Reason for the refund (at least 10 characters)"),
-    );
-    if (!reason) return;
+  async function refund(p, reason, amount) {
     try {
       await api(`/admin/payments/${p.id}/refund`, {
         method: "POST",
-        body: JSON.stringify({ amountEgp: Number(raw), reason }),
+        body: JSON.stringify({ amountEgp: amount, reason }),
       });
       setToast(
         L(
@@ -6630,7 +6715,7 @@ function AdminPaymentsPanel() {
       );
       setRefresh((x) => x + 1);
     } catch (e) {
-      setToast(e.message);
+      setToast(approvalErrorText(L, e.message));
     }
   }
   async function reconcile(p) {
@@ -6651,6 +6736,7 @@ function AdminPaymentsPanel() {
   return (
     <div className="settings-form">
       <h2>{L("المدفوعات", "Payments")}</h2>
+      {dialog}
       <label>
         {L("الحالة", "Status")}
         <select value={status} onChange={(e) => { setStatus(e.target.value); setPage(1); }}>
@@ -6677,7 +6763,16 @@ function AdminPaymentsPanel() {
             </div>
             <div className="admin-perk-actions">
               {p.status === "paid" && (
-                <button onClick={() => refund(p)}>{L("استرداد", "Refund")}</button>
+                <button onClick={() =>
+                    openDialog({
+                      title: L("طلب استرداد", "Request a refund"),
+                      amountLabel: L("مبلغ الاسترداد (ج.م)", "Refund amount (EGP)"),
+                      amountDefault: String(p.amountEgp - p.refundedAmountEgp),
+                      reasonLabel: L("سبب الاسترداد", "Reason for the refund"),
+                      submitLabel: L("إرسال الطلب", "Send request"),
+                      onSubmit: (reason, amount) => refund(p, reason, amount),
+                    })
+                  }>{L("استرداد", "Refund")}</button>
               )}
               {["pending", "failed"].includes(p.status) && p.merchantOrderId && (
                 <button onClick={() => reconcile(p)}>{L("مطابقة", "Reconcile")}</button>
@@ -6706,19 +6801,14 @@ function AdminApprovalsPanel() {
   const [refresh, setRefresh] = useState(0);
   const [rejecting, setRejecting] = useState(null);
   const [note, setNote] = useState("");
-  const { data, loading, error } = useData("/admin/approvals", refresh);
+  const [review, setReview] = useState(false);
+  const isSuper = currentUser.role === "super_admin";
+  const { data, loading, error } = useData(`/admin/approvals${review ? "?status=needs_review" : ""}`, refresh);
   // Move focus into the note field when it opens.
   useEffect(() => {
     if (rejecting) noteRef.current?.focus();
   }, [rejecting]);
-  const errorText = (code) =>
-    ({
-      self_approval_forbidden: L("لا يمكنك قرار طلب قدمته أنت", "You cannot decide a request you made yourself"),
-      super_admin_required: L("هذا الطلب يحتاج مشرفًا أعلى", "This request needs a super admin"),
-      request_expired: L("انتهت مهلة الطلب", "This request has expired"),
-      request_not_pending: L("تم البت في الطلب بالفعل", "This request was already decided"),
-      note_required: L("اكتب ملاحظة الرفض", "Write a rejection note"),
-    })[code] || code;
+  const errorText = (code) => approvalErrorText(L, code);
   async function decide(item, verb) {
     try {
       await api(`/admin/approvals/${item.id}/${verb}`, {
@@ -6748,6 +6838,12 @@ function AdminApprovalsPanel() {
           "Every manual activation or refund needs a different admin to approve it.",
         )}
       </p>
+      {isSuper && (
+        <label>
+          <input type="checkbox" checked={review} onChange={(e) => setReview(e.target.checked)} />{" "}
+          {L("عرض ما يحتاج مراجعة فقط", "Show only items that need review")}
+        </label>
+      )}
       <Loadable loading={loading} error={error}>
         {data?.items?.map((item) => {
           const own = item.requestedBy?.id === currentUser.id;
@@ -6765,14 +6861,25 @@ function AdminApprovalsPanel() {
                   {L("السبب", "Reason")}: {item.reason}
                 </p>
                 <small>
-                  {L("الطالب", "Requested by")}: {item.requestedBy?.name || "-"} ({item.requestedBy?.email || "-"}) ·{" "}
-                  {L("منذ", "age")} {age(item.createdAt)} · {L("الهدف", "Target")}: {item.targetType} {item.targetId.slice(0, 8)}
+                  {L("الطالب", "Requested by")}: {item.requestedBy?.name || "-"} (
+                  <bdi dir="ltr">{item.requestedBy?.email || "-"}</bdi>) · {L("منذ", "age")} {age(item.createdAt)} ·{" "}
+                  {L("الهدف", "Target")}: {item.targetType} <bdi dir="ltr">{item.targetId.slice(0, 8)}</bdi>
                 </small>
+                {item.needsReview && (
+                  <p role="note">
+                    <strong>
+                      {L(
+                        "يحتاج مراجعة: وُوفق عليه لكن لم يُتأكد من تنفيذه. راجع الدفع والسجل يدويًا.",
+                        "Needs review: approved but not confirmed as done. Check the payment and audit log by hand.",
+                      )}
+                    </strong>
+                  </p>
+                )}
                 {own && (
-                  <p role="note">{L("طلبك أنت، يقرره مشرف آخر.", "Your own request. Another admin must decide it.")}</p>
+                  <p role="note" id={`appr-why-${item.id}`}>{L("طلبك أنت، يقرره مشرف آخر.", "Your own request. Another admin must decide it.")}</p>
                 )}
                 {!own && needsSuper && (
-                  <p role="note">{L("يقرره مشرف أعلى فقط.", "Only a super admin can decide this one.")}</p>
+                  <p role="note" id={`appr-why-${item.id}`}>{L("يقرره مشرف أعلى فقط.", "Only a super admin can decide this one.")}</p>
                 )}
                 {rejecting === item.id && (
                   <form
@@ -6800,10 +6907,10 @@ function AdminApprovalsPanel() {
                 )}
               </div>
               <div className="admin-perk-actions">
-                <button disabled={blocked} onClick={() => decide(item, "approve")}>
+                <button disabled={blocked || item.status !== "pending"} aria-describedby={blocked ? `appr-why-${item.id}` : undefined} onClick={() => decide(item, "approve")}>
                   {L("موافقة", "Approve")}
                 </button>
-                <button disabled={blocked} onClick={() => { setRejecting(item.id); setNote(""); }}>
+                <button disabled={blocked || item.status !== "pending"} aria-describedby={blocked ? `appr-why-${item.id}` : undefined} onClick={() => { setRejecting(item.id); setNote(""); }}>
                   {L("رفض", "Reject")}
                 </button>
               </div>
@@ -7174,6 +7281,7 @@ function AdminPage() {
   const { user, setToast } = useApp();
   const [refresh, setRefresh] = useState(0),
     [tab, setTab] = useState(user.role === "moderator" ? "reports" : "overview"),
+    [dialog, openDialog] = useReasonDialog(L),
     [selectedChallenge, setSelectedChallenge] = useState(null),
     [form, setForm] = useState({
       title: "",
@@ -7242,11 +7350,7 @@ function AdminPage() {
       setToast(e.message);
     }
   }
-  async function activateSubscription(id) {
-    const reason = window.prompt(
-      L("سبب التفعيل اليدوي (10 أحرف على الأقل)", "Reason for manual activation (at least 10 characters)"),
-    );
-    if (!reason) return;
+  async function activateSubscription(id, reason) {
     try {
       await api(`/admin/subscriptions/${id}/activate`, {
         method: "PATCH",
@@ -7260,11 +7364,12 @@ function AdminPage() {
         ),
       );
     } catch (e) {
-      setToast(e.message);
+      setToast(approvalErrorText(L, e.message));
     }
   }
   return (
     <>
+      {dialog}
       <AppHeading
         eyebrow={L("تشغيل المنصة", "PLATFORM OPERATIONS")}
         title={t.admin}
@@ -7407,7 +7512,14 @@ function AdminPage() {
                     {new Date(item.createdAt).toLocaleString()}
                   </small>
                 </div>
-                <button onClick={() => activateSubscription(item.id)}>
+                <button onClick={() =>
+                  openDialog({
+                    title: L("طلب تفعيل يدوي", "Request manual activation"),
+                    reasonLabel: L("سبب التفعيل اليدوي", "Reason for manual activation"),
+                    submitLabel: L("إرسال الطلب", "Send request"),
+                    onSubmit: (reason) => activateSubscription(item.id, reason),
+                  })
+                }>
                   {L("طلب تفعيل (بعد تأكيد الدفع)", "Request activation (payment confirmed)")}
                 </button>
               </div>

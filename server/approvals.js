@@ -8,8 +8,11 @@
 // pending and not expired, the status change is claimed with a conditional
 // UPDATE so a double approve acts once.
 
+import { logger } from "./logger.js";
+
 const TTL_MS = 24 * 60 * 60 * 1000;
-const STATUSES = ["pending", "approved", "rejected", "expired"];
+const STATUSES = ["pending", "approved", "rejected", "expired", "needs_review"];
+const stale = () => Object.assign(new Error("request_stale"), { status: 409 });
 
 export function registerApprovalRoutes(app, deps) {
   const { sequelize, Op, User, Plan, Subscription, PaymentAttempt, ApprovalRequest, auth, admin, fail, audit, notify, hasRole } = deps;
@@ -44,8 +47,14 @@ export function registerApprovalRoutes(app, deps) {
     try {
       await expireOld();
       const status = STATUSES.includes(req.query.status) ? req.query.status : "pending";
+      // needs_review: super_admin only. Includes approved rows whose action never ran.
+      if (status === "needs_review" && !hasRole(req.user, "super_admin")) return fail(res, 403, "super_admin_required");
+      const where =
+        status === "needs_review"
+          ? { [Op.or]: [{ status: "needs_review" }, { status: "approved", executedAt: null }] }
+          : { status };
       const rows = await ApprovalRequest.findAll({
-        where: { status },
+        where,
         order: [["createdAt", "ASC"]],
         limit: 100,
       });
@@ -64,6 +73,8 @@ export function registerApprovalRoutes(app, deps) {
           requestedBy: byId.get(r.requestedById) || null,
           decidedBy: byId.get(r.decidedById) || null,
           decidedAt: r.decidedAt,
+          executedAt: r.executedAt,
+          needsReview: r.status === "needs_review" || (r.status === "approved" && !r.executedAt),
           decisionNote: r.decisionNote,
           createdAt: r.createdAt,
           expiresAt: r.expiresAt,
@@ -128,6 +139,14 @@ export function registerApprovalRoutes(app, deps) {
             if (!item) throw Object.assign(new Error("not_found"), { status: 404 });
             if (item.status !== "pending_payment")
               throw Object.assign(new Error("payment_confirmation_required"), { status: 409 });
+            const p = JSON.parse(r.payload || "{}");
+            if (
+              p.planCode !== item.Plan?.code ||
+              p.billingCycle !== item.billingCycle ||
+              p.amountEgp !== item.amountEgp ||
+              p.memberId !== item.UserId
+            )
+              throw stale();
             endsAt = new Date();
             endsAt.setMonth(endsAt.getMonth() + (item.billingCycle === "yearly" ? 12 : 1));
             await Subscription.update(
@@ -141,37 +160,58 @@ export function registerApprovalRoutes(app, deps) {
             );
             plan = item.Plan;
             userId = item.UserId;
+            // Audit rows and executedAt share the transaction: all or nothing.
+            await audit(req, "activate_paid_subscription", "subscription", r.targetId, `${plan.code}:${details(r, req)}`, t);
+            await ApprovalRequest.update({ executedAt: new Date() }, { where: { id: r.id }, transaction: t });
           });
         } catch (e) {
           if (e.status) return fail(res, e.status, e.message);
           throw e;
         }
-        await audit(req, "activate_paid_subscription", "subscription", r.targetId, `${plan.code}:${details(r, req)}`);
         await notify(userId, "subscription_active", "Your USAM Communities subscription is active", "/billing");
         return res.json({ id: r.id, status: "approved", subscriptionStatus: "active", endsAt });
       }
 
       // refund_payment: the provider call cannot sit inside a DB transaction,
-      // so claim first, act, and put the request back to pending on failure.
+      // so claim first, then act. The request goes back to pending ONLY when
+      // we know no money moved: a failed pre-check, or issueRefund returning
+      // ok:false (it does that before/at the provider call). Any throw out of
+      // issueRefund may be after the provider refund, so it is never undone:
+      // the request becomes needs_review and is logged.
       const [n] = await claim(r, "approved", req, note);
       if (!n) return fail(res, 409, "request_not_pending");
       const undo = () =>
         ApprovalRequest.update({ status: "pending", decidedById: null, decidedAt: null, decisionNote: null }, { where: { id: r.id } });
-      try {
-        const attempt = await PaymentAttempt.findByPk(r.targetId, { include: [Subscription] });
-        if (!attempt) return await undo(), fail(res, 404, "not_found");
-        if (attempt.status !== "paid") return await undo(), fail(res, 409, "attempt_not_refundable");
-        const amount = Number(JSON.parse(r.payload || "{}").amountEgp) || attempt.amountEgp;
-        if (amount <= 0 || amount > attempt.amountEgp - attempt.refundedAmountEgp)
-          return await undo(), fail(res, 400, "invalid_refund_amount");
-        const out = await deps.issueRefund(attempt, amount, req);
-        if (!out.ok) return await undo(), fail(res, 502, out.error);
-        await audit(req, "approve_request", r.targetType, r.targetId, details(r, req));
-        return res.json({ id: r.id, status: "approved", refundedAmountEgp: out.refundedAmountEgp, providerConfirmed: out.providerConfirmed });
-      } catch (e) {
+      const attempt = await PaymentAttempt.findByPk(r.targetId, { include: [Subscription] }).catch(async (e) => {
         await undo();
         throw e;
+      });
+      if (!attempt) return await undo(), fail(res, 404, "not_found");
+      if (attempt.status !== "paid") return await undo(), fail(res, 409, "attempt_not_refundable");
+      const p = JSON.parse(r.payload || "{}");
+      if (p.paidEgp !== attempt.amountEgp || p.memberId !== attempt.UserId) return await undo(), fail(res, 409, "request_stale");
+      const amount = Number(p.amountEgp) || attempt.amountEgp;
+      if (amount <= 0 || amount > attempt.amountEgp - attempt.refundedAmountEgp)
+        return await undo(), fail(res, 400, "invalid_refund_amount");
+      let out;
+      try {
+        out = await deps.issueRefund(attempt, amount, req);
+      } catch (e) {
+        logger.error("approvals.refund_failed_after_claim", { requestId: r.id, attemptId: attempt.id, error: String(e) });
+        await ApprovalRequest.update({ status: "needs_review" }, { where: { id: r.id } }).catch((e2) =>
+          logger.error("approvals.needs_review_mark_failed", { requestId: r.id, error: String(e2) }),
+        );
+        throw e;
       }
+      if (!out.ok) return await undo(), fail(res, 502, out.error);
+      // Money moved. From here nothing may undo the request.
+      try {
+        await ApprovalRequest.update({ executedAt: new Date() }, { where: { id: r.id } });
+        await audit(req, "approve_request", r.targetType, r.targetId, details(r, req));
+      } catch (e) {
+        logger.error("approvals.post_refund_bookkeeping_failed", { requestId: r.id, attemptId: attempt.id, error: String(e) });
+      }
+      return res.json({ id: r.id, status: "approved", refundedAmountEgp: out.refundedAmountEgp, providerConfirmed: out.providerConfirmed });
     } catch (e) {
       next(e);
     }

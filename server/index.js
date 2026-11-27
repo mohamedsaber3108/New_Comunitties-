@@ -422,14 +422,17 @@ async function notify(UserId, kind, text, href) {
     logger.warn("notify.failed", { UserId, kind, error: String(err) });
   }
 }
-async function audit(req, action, subjectType, subjectId, details = "") {
-  await AuditLog.create({
-    UserId: req.user.id,
-    action,
-    subjectType,
-    subjectId,
-    details,
-  });
+async function audit(req, action, subjectType, subjectId, details = "", transaction) {
+  await AuditLog.create(
+    {
+      UserId: req.user.id,
+      action,
+      subjectType,
+      subjectId,
+      details,
+    },
+    transaction ? { transaction } : undefined,
+  );
 }
 // authLimit: shared alias kept for identity.js's existing call sites
 // (forgot/reset password). Backed by server/ratelimit.js's bounded-memory

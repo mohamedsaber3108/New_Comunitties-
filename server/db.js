@@ -581,12 +581,14 @@ export const ApprovalRequest = sequelize.define(
     reason: { type: DataTypes.STRING(500), allowNull: false },
     requestedById: { type: DataTypes.UUID, allowNull: false },
     status: {
-      type: DataTypes.ENUM("pending", "approved", "rejected", "expired"),
+      type: DataTypes.ENUM("pending", "approved", "rejected", "expired", "needs_review"),
       defaultValue: "pending",
       allowNull: false,
     },
     decidedById: { type: DataTypes.UUID },
     decidedAt: { type: DataTypes.DATE },
+    // Set only when the approved action really ran. approved + null = needs review.
+    executedAt: { type: DataTypes.DATE },
     decisionNote: { type: DataTypes.STRING(500) },
     expiresAt: { type: DataTypes.DATE, allowNull: false },
   },

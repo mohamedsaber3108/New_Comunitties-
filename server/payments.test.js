@@ -48,7 +48,7 @@ globalThis.fetch = async (url, init) => {
   return json({ message: "not_found" }, 404);
 };
 
-const { initDb, sequelize, User, Subscription, PaymentAttempt, WebhookEvent, OutboxMessage } =
+const { initDb, sequelize, User, Subscription, PaymentAttempt, WebhookEvent, OutboxMessage, ApprovalRequest, AuditLog } =
   await import("./db.js");
 const { runPaymentMaintenance } = await import("./payments.js");
 const { default: app } = await import("./index.js");
@@ -258,6 +258,90 @@ test("a success callback for a refunded payment cannot resurrect the subscriptio
   const w = signedWebhook(txnFor(attempt.id, 149));
   await req(w.path, "POST", w.body);
   assert.equal((await Subscription.findByPk(attempt.SubscriptionId)).status, "canceled");
+});
+
+// A member with a PAID attempt (via the signed webhook) for the approval tests.
+async function paidAttemptFor(email, key) {
+  const cookie = await signup(email);
+  const started = await startPaidSubscription(cookie, key);
+  assert.equal(started.status, 202);
+  const user = await User.findOne({ where: { email } });
+  const attempt = await PaymentAttempt.findOne({ where: { UserId: user.id } });
+  const w = signedWebhook(txnFor(attempt.id, 149));
+  assert.equal((await req(w.path, "POST", w.body)).status, 200);
+  return PaymentAttempt.findByPk(attempt.id);
+}
+
+test("refund approval: a failure AFTER the provider refund never reopens the request", async () => {
+  const attempt = await paidAttemptFor("afterprov@example.test", "pay-key-0000000a1");
+  const refundCalls = () => paymobCalls.filter((c) => c.url.endsWith("/void_refund/refund")).length;
+  const asked = await req(`/admin/payments/${attempt.id}/refund`, "POST", { amountEgp: 40, reason: "customer asked for money back" }, adminCookie);
+  assert.equal(asked.status, 201);
+  const before = refundCalls();
+  // Make issueRefund's own audit write throw after the provider call succeeded.
+  const realCreate = AuditLog.create;
+  AuditLog.create = async (row, ...rest) => {
+    if (row.action === "refund_payment") throw new Error("audit_down");
+    return realCreate.call(AuditLog, row, ...rest);
+  };
+  let first;
+  try {
+    first = await req(`/admin/approvals/${asked.body.id}/approve`, "POST", {}, admin2Cookie);
+  } finally {
+    AuditLog.create = realCreate;
+  }
+  assert.equal(first.status, 500);
+  assert.equal(refundCalls(), before + 1, "provider was called once");
+  const row = await ApprovalRequest.findByPk(asked.body.id);
+  assert.notEqual(row.status, "pending");
+  assert.equal(row.status, "needs_review");
+  assert.equal(row.executedAt, null);
+  // A second approve is refused, so the provider is not called again.
+  const second = await req(`/admin/approvals/${asked.body.id}/approve`, "POST", {}, admin2Cookie);
+  assert.equal(second.status, 409);
+  assert.equal(second.body.error, "request_not_pending");
+  assert.equal(refundCalls(), before + 1);
+  // super_admin sees it under needs_review; a plain admin does not.
+  assert.equal((await req("/admin/approvals?status=needs_review", "GET", null, adminCookie)).status, 403);
+});
+
+test("refund approval: success sets executedAt; a changed paid amount is request_stale", async () => {
+  const attempt = await paidAttemptFor("stalerefund@example.test", "pay-key-0000000b1");
+  const ok = await refundVia(attempt.id, { amountEgp: 10 });
+  assert.equal(ok.status, 200);
+  const done = await ApprovalRequest.findOne({ where: { targetId: attempt.id, status: "approved" } });
+  assert.ok(done.executedAt);
+
+  const asked = await req(`/admin/payments/${attempt.id}/refund`, "POST", { amountEgp: 10, reason: "second goodwill refund" }, adminCookie);
+  assert.equal(asked.status, 201);
+  await PaymentAttempt.update({ amountEgp: 150 }, { where: { id: attempt.id } });
+  const calls = paymobCalls.filter((c) => c.url.endsWith("/void_refund/refund")).length;
+  const stale = await req(`/admin/approvals/${asked.body.id}/approve`, "POST", {}, admin2Cookie);
+  assert.equal(stale.status, 409);
+  assert.equal(stale.body.error, "request_stale");
+  assert.equal(paymobCalls.filter((c) => c.url.endsWith("/void_refund/refund")).length, calls, "no provider call");
+  assert.equal((await ApprovalRequest.findByPk(asked.body.id)).status, "pending");
+});
+
+test("activation approval: a plan or price change after the request is request_stale and nothing activates", async () => {
+  const cookie = await signup("staleactivate@example.test");
+  const started = await startPaidSubscription(cookie, "pay-key-0000000c1");
+  assert.equal(started.status, 202);
+  const subId = (await Subscription.findOne({ where: { UserId: (await User.findOne({ where: { email: "staleactivate@example.test" } })).id } })).id;
+  await User.update({ role: "super_admin" }, { where: { email: ["payadmin@example.test", "payadmin2@example.test"] } });
+  try {
+    const asked = await req(`/admin/subscriptions/${subId}/activate`, "PATCH", { confirmed: true, reason: "bank transfer seen" }, adminCookie);
+    assert.equal(asked.status, 201);
+    await Subscription.update({ billingCycle: "yearly" }, { where: { id: subId } });
+    const stale = await req(`/admin/approvals/${asked.body.id}/approve`, "POST", {}, admin2Cookie);
+    assert.equal(stale.status, 409);
+    assert.equal(stale.body.error, "request_stale");
+    assert.equal((await Subscription.findByPk(subId)).status, "pending_payment");
+    // The claim rolled back with the transaction: still pending, still approvable later.
+    assert.equal((await ApprovalRequest.findByPk(asked.body.id)).status, "pending");
+  } finally {
+    await User.update({ role: "admin" }, { where: { email: ["payadmin@example.test", "payadmin2@example.test"] } });
+  }
 });
 
 test("billing history lists the member's own payments only", async () => {
