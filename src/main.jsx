@@ -1276,12 +1276,13 @@ function AppShell({ children }) {
         <button
           onClick={() => setDrawer(false)}
           className="icon-btn sidebar-close"
+          aria-label={L("أغلق القائمة", "Close menu")}
         >
           <X size={20} />
         </button>
       </div>
       <div className="side-group-label">{L("مساحتك", "YOUR SPACE")}</div>
-      <nav>
+      <nav aria-label={L("مساحتك", "Your space")}>
         {nav.map(([to, Icon, label]) => (
           <NavLink
             key={to}
@@ -1296,7 +1297,7 @@ function AppShell({ children }) {
         ))}
       </nav>
       <div className="side-group-label second">{L("حسابك", "ACCOUNT")}</div>
-      <nav>
+      <nav aria-label={L("حسابك", "Account")}>
         {personal.map(([to, Icon, label]) => (
           <NavLink
             key={to}
@@ -1370,7 +1371,7 @@ function AppShell({ children }) {
             USAM <span>/</span> {t.communities}
           </div>
           <div className="topbar-actions">
-            <Link to="/search" className="topbar-search">
+            <Link to="/search" className="topbar-search" aria-label={t.search}>
               <Search size={18} />
               <span>{t.search}</span>
               <kbd>⌘ K</kbd>
@@ -2087,7 +2088,7 @@ function PostList({ posts, onChange }) {
               </button>
             )}
           </div>
-          <Link to={`/posts/${p.id}`} className="post-body">
+          <Link to={`/posts/${p.id}`} className="post-body" dir="auto">
             {p.body}
           </Link>
           <PostImages images={p.images} />
@@ -2568,7 +2569,7 @@ function PostDetail() {
                       </span>
                       <div>
                         <strong>{c.author?.name}</strong>
-                        <p>{c.body}</p>
+                        <p dir="auto">{c.body}</p>
                       </div>
                       {user &&
                         (user.id === c.author?.id ||
@@ -3142,7 +3143,7 @@ function MemberProfile() {
           <div className="profile-card">
             <AvatarImage person={person} />
             <h2>{person.name}</h2>
-            <p>{person.bio}</p>
+            <p dir="auto">{person.bio}</p>
             <span>
               <MapPin size={16} />
               {person.location || L("لم يحدد الموقع", "Location not listed")}
@@ -9136,7 +9137,7 @@ function MessagesPage() {
                     {c.lastMessage && (
                       <small className="message-preview">
                         {c.lastMessage.mine ? L("أنت: ", "You: ") : ""}
-                        {c.lastMessage.body}
+                        <bdi>{c.lastMessage.body}</bdi>
                       </small>
                     )}
                     <small>{new Date(c.updatedAt).toLocaleString()}</small>
@@ -9202,7 +9203,7 @@ function MessagesPage() {
                           key={m.id}
                           className={`message-bubble ${m.SenderId === user.id ? "mine" : ""}`}
                         >
-                          <p>{m.body}</p>
+                          <p dir="auto">{m.body}</p>
                           <small>
                             {new Date(m.createdAt).toLocaleTimeString([], {
                               hour: "2-digit",
@@ -9270,7 +9271,7 @@ function ChallengeReview({ id }) {
           <div className="admin-row" key={s.id}>
             <div>
               <strong>{s.User?.name}</strong>
-              <p>{s.body}</p>
+              <p dir="auto">{s.body}</p>
               <small>
                 {s.status} {s.feedback}
               </small>
@@ -9486,7 +9487,7 @@ function MySubmissions() {
             >
               <div>
                 <strong>{s.Challenge?.title}</strong>
-                <p>{s.body}</p>
+                <p dir="auto">{s.body}</p>
                 <small>
                   {s.status} {s.feedback && `· ${s.feedback}`}
                 </small>
