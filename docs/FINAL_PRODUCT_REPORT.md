@@ -3,6 +3,8 @@
 _Last updated 2026-11-22. Repository: `github.com/mohamedsaber3108/New_Comunitties-` (branch `main`).
 Live staging/production host: **https://13-48-137-19.sslip.io** (EC2 "Hub", Ubuntu 26.04, side by side with USAM Hub)._
 
+> **Changes on main after 2026-11-22 (added 2026-11-27).** Migration `0007_approval_requests` (two-person approval for manual activation and refunds). In production the app refuses to start unless `REQUIRE_ADMIN_MFA=true` and `MFA_ENCRYPTION_KEY` are set, or `ALLOW_STAFF_WITHOUT_MFA=true`. Staff sessions end after 30 min idle or 8 h. Sign-up gives a neutral reply and does not sign in. Coupons have a server-side cap (40% by default) and price floor (10 EGP by default). Roles and rules: `documentation/04-Backend/RBAC.md`. The sections below describe the 2026-11-22 state.
+
 This file is the single entry point. The specialised documents in this folder go deeper:
 `API_DOCUMENTATION.md` (generated from the live router), `SECURITY_AUDIT.md`,
 `TESTING_AND_RELEASE_REPORT.md`, `PRODUCTION_DEPLOYMENT_GUIDE.md`,
