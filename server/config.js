@@ -9,6 +9,7 @@
 const bool = (v, fallback = false) =>
   v === undefined ? fallback : String(v).toLowerCase() === "true";
 const num = (v, fallback) => (v === undefined ? fallback : Number(v));
+const finite = (v, fallback) => (v === undefined || v === "" || !Number.isFinite(Number(v)) ? fallback : Number(v));
 const str = (v, fallback = "") => (v === undefined ? fallback : String(v));
 const list = (v) =>
   str(v)
@@ -61,6 +62,17 @@ export const config = {
   staffSession: {
     idleMin: num(process.env.STAFF_SESSION_IDLE_MIN, 30),
     maxHours: num(process.env.STAFF_SESSION_MAX_HOURS, 8),
+  },
+
+  // Coupon guardrails (P-05, PRICING_RESEARCH s.8 and 12a). Defaults taken,
+  // owner may change: a partial discount is at most 40% of the price, and a
+  // discounted price that is still paid may not drop below the floor (gateway
+  // fee plus cost; 10 EGP is a placeholder until real costs are known).
+  // A 100% code (price 0) is a scholarship grant: no gateway fee, audited.
+  coupons: {
+    // A bad value falls back to the default; the cap is kept within 0-100.
+    maxDiscountPct: Math.min(100, Math.max(0, finite(process.env.COUPON_MAX_DISCOUNT_PCT, 40))),
+    priceFloorEgp: Math.max(0, finite(process.env.COUPON_PRICE_FLOOR_EGP, 10)),
   },
 
   // Email (AWS SES by default; console transport in dev/test)

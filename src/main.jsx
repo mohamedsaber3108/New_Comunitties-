@@ -5973,7 +5973,13 @@ function AdminCouponsPanel() {
       setRefresh((x) => x + 1);
       setToast(L("تم إنشاء الكود", "Promo code created"));
     } catch (err) {
-      setToast(err.message === "coupon_code_taken" ? L("الكود مستخدم بالفعل", "That code already exists") : L("راجع الحقول", "Check the fields"));
+      setToast(
+        err.message === "coupon_code_taken"
+          ? L("الكود مستخدم بالفعل", "That code already exists")
+          : err.message === "coupon_above_cap"
+            ? L("الخصم بالنسبة أعلى من الحد المسموح (40% افتراضيًا). استخدم نسبة أقل، أو 100% لمنحة كاملة", "This percent is above the allowed cap (40% by default). Use a lower percent, or 100% for a full grant")
+            : L("راجع الحقول", "Check the fields"),
+      );
     }
   }
   async function patch(c, body, done) {
@@ -5982,7 +5988,7 @@ function AdminCouponsPanel() {
       setRefresh((x) => x + 1);
       setToast(done);
     } catch (err) {
-      setToast(err.message);
+      setToast(couponErrorText(err.message, L));
     }
   }
   const describe = (c) =>
@@ -10496,6 +10502,8 @@ function couponErrorText(code, L) {
       coupon_exhausted: L("تم استخدام هذا الكود بالكامل", "This code has been fully used"),
       coupon_already_used: L("استخدمت هذا الكود من قبل", "You have already used this code"),
       coupon_changed: L("تغيّر الكود، طبّقه مرة أخرى", "The code changed, apply it again"),
+      coupon_above_cap: L("هذا الخصم أكبر من الحد المسموح، ولا يمكن استخدامه هنا", "This discount is above the allowed limit and cannot be used here"),
+      coupon_below_floor: L("السعر بعد الخصم أقل من الحد الأدنى، ولا يمكن استخدام الكود هنا", "The price after this discount is below the minimum, so the code cannot be used here"),
       too_many_requests: L("محاولات كثيرة، حاول لاحقًا", "Too many attempts, try again later"),
     }[code] || code
   );

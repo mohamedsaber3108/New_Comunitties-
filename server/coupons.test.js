@@ -122,9 +122,10 @@ test("quote: percent and fixed discounts are computed on the server", async () =
   const plans = (await req("/plans")).body.items;
   const proYear = plans.find((p) => p.code === "pro").yearlyEgp;
   assert.equal(fix.body.finalEgp, proYear - 50);
-  // A fixed discount never goes below zero.
+  // A fixed amount that covers the whole price is not a grant (P-05): only
+  // an explicit 100% code may make an item free.
   await createCoupon({ code: "HUGE", discountType: "fixed", value: 99999 });
-  assert.equal((await req("/coupons/quote", "POST", { code: "HUGE", planCode: "plus", billingCycle: "monthly" }, m)).body.finalEgp, 0);
+  assert.equal((await req("/coupons/quote", "POST", { code: "HUGE", planCode: "plus", billingCycle: "monthly" }, m)).body.error, "coupon_above_cap");
   assert.equal((await req("/coupons/quote", "POST", { code: "WELCOME20", planCode: "plus", billingCycle: "monthly" })).status, 401);
 });
 
@@ -221,16 +222,17 @@ test("parallel checkouts never exceed the total limit", async () => {
 test("event tickets: partial code discounts the Paymob amount; 100% code issues the ticket, within capacity", async () => {
   const startsAt = new Date(Date.now() + 10 * 86400_000).toISOString();
   const ev = await req("/admin/events", "POST", { title: "Promo Dinner", startsAt, capacity: 2, community: "launchpad", priceType: "paid", priceEgp: 400 }, adminCookie);
-  await createCoupon({ code: "HALFEVENT", discountType: "percent", value: 50, appliesTo: "event" });
+  // 40% is the cap (P-05); the name stays for history.
+  await createCoupon({ code: "HALFEVENT", discountType: "percent", value: 40, appliesTo: "event" });
   await createCoupon({ code: "COMPTICKET", discountType: "percent", value: 100, appliesTo: "event", perUserLimit: 1 });
   const a = await member(), b = await member(), c = await member();
-  assert.equal((await req("/coupons/quote", "POST", { code: "HALFEVENT", eventId: ev.body.id }, a)).body.finalEgp, 200);
+  assert.equal((await req("/coupons/quote", "POST", { code: "HALFEVENT", eventId: ev.body.id }, a)).body.finalEgp, 240);
   assert.equal((await req("/coupons/quote", "POST", { code: "HALFEVENT", planCode: "plus", billingCycle: "monthly" }, a)).body.error, "coupon_not_applicable");
   const half = await req(`/events/${ev.body.id}/register`, "POST", { couponCode: "HALFEVENT" }, a);
   assert.equal(half.status, 202);
-  assert.equal(half.body.amountEgp, 200);
-  assert.equal((await PaymentAttempt.findByPk(half.body.paymentAttemptId)).amountEgp, 200);
-  await signedWebhook(half.body.paymentAttemptId, 200);
+  assert.equal(half.body.amountEgp, 240);
+  assert.equal((await PaymentAttempt.findByPk(half.body.paymentAttemptId)).amountEgp, 240);
+  await signedWebhook(half.body.paymentAttemptId, 240);
   assert.equal((await req(`/events/${ev.body.id}/ticket`, "GET", undefined, a)).status, 200);
   assert.equal((await CouponRedemption.findOne({ where: { PaymentAttemptId: half.body.paymentAttemptId } })).status, "redeemed");
 
@@ -267,6 +269,50 @@ test("admin reporting: live uses, redemptions, discount given; terms lock once u
   assert.ok(audit.includes("create_coupon") && audit.includes("update_coupon") && audit.includes("activate_subscription_with_coupon"));
 });
 
+test("P-05 guardrails: 40% cap and price floor on the server; 100% grants still work", async () => {
+  // Creation: a percent code above the cap is refused; 40% and 100% are fine.
+  const over = await createCoupon({ code: "OVERCAP", discountType: "percent", value: 41 });
+  assert.equal(over.status, 400);
+  assert.equal(over.body.error, "coupon_above_cap");
+  assert.equal((await createCoupon({ code: "ATCAP", discountType: "percent", value: 40 })).status, 201);
+  assert.equal((await createCoupon({ code: "SCHOLAR", discountType: "percent", value: 100 })).status, 201);
+  // Editing an unused code above the cap is refused too.
+  const atcap = (await req("/admin/coupons", "GET", null, adminCookie)).body.items.find((c) => c.code === "ATCAP");
+  const edit = await req(`/admin/coupons/${atcap.id}`, "PATCH", { value: 60 }, adminCookie);
+  assert.equal(edit.status, 400);
+  assert.equal(edit.body.error, "coupon_above_cap");
+  // Quote: a fixed code that ends above the cap is refused (100 of 149 = 67%).
+  const m = await member();
+  await createCoupon({ code: "FIXED100", discountType: "fixed", value: 100 });
+  const q = await req("/coupons/quote", "POST", { code: "FIXED100", planCode: "plus", billingCycle: "monthly" }, m);
+  assert.equal(q.status, 400);
+  assert.equal(q.body.error, "coupon_above_cap");
+  // Checkout refuses the same code and creates nothing.
+  const before = await PaymentAttempt.count();
+  const r = await subscribe(m, { couponCode: "FIXED100" });
+  assert.equal(r.status, 400);
+  assert.equal(r.body.error, "coupon_above_cap");
+  assert.equal(await PaymentAttempt.count(), before);
+  // Floor: 40% of a 15 EGP ticket leaves 9 EGP, below the 10 EGP floor.
+  const startsAt = new Date(Date.now() + 12 * 86400_000).toISOString();
+  const cheap = await req("/admin/events", "POST", { title: "Tiny Meetup", startsAt, capacity: 5, community: "launchpad", priceType: "paid", priceEgp: 15 }, adminCookie);
+  const floor = await req("/coupons/quote", "POST", { code: "ATCAP", eventId: cheap.body.id }, m);
+  assert.equal(floor.status, 400);
+  assert.equal(floor.body.error, "coupon_below_floor");
+  // Same refusal at real event checkout, and nothing is held or charged.
+  const regsBefore = await Registration.count({ where: { EventId: cheap.body.id } });
+  const attemptsBefore = await PaymentAttempt.count();
+  const reg = await req(`/events/${cheap.body.id}/register`, "POST", { couponCode: "ATCAP" }, m);
+  assert.equal(reg.status, 400);
+  assert.equal(reg.body.error, "coupon_below_floor");
+  assert.equal(await Registration.count({ where: { EventId: cheap.body.id } }), regsBefore);
+  assert.equal(await PaymentAttempt.count(), attemptsBefore);
+  // A full grant (price 0) is a scholarship: allowed.
+  const free = await req("/coupons/quote", "POST", { code: "SCHOLAR", planCode: "plus", billingCycle: "monthly" }, m);
+  assert.equal(free.status, 200);
+  assert.equal(free.body.finalEgp, 0);
+});
+
 test("admin analytics reflect real activity and are admin-only", async () => {
   const m = await member();
   assert.equal((await req("/admin/analytics?days=30", "GET", null, m)).status, 403);
@@ -277,13 +323,13 @@ test("admin analytics reflect real activity and are admin-only", async () => {
   assert.equal(d.growth.newMembersByDay.length, 30);
   assert.equal(d.growth.totalMembers, await User.count({ where: { isDeleted: false } }));
   assert.equal(d.growth.newMembersByDay.reduce((s, x) => s + x.value, 0), d.growth.newMembers);
-  // Revenue = what the signed webhooks confirmed in this file: 120 (plan) + 200 (event).
+  // Revenue = what the signed webhooks confirmed in this file: 120 (plan) + 240 (event).
   assert.equal(d.revenue.plansEgp, 120);
-  assert.equal(d.revenue.eventsEgp, 200);
-  assert.equal(d.revenue.netEgp, 320);
-  assert.equal(d.revenue.netByDay.reduce((s, x) => s + x.value, 0), 320);
-  // Coupon discount given = redeemed rows: 29 + 149 (100% plan) + 200 + 400.
-  assert.equal(d.revenue.couponDiscountEgp, 29 + 149 + 200 + 400);
+  assert.equal(d.revenue.eventsEgp, 240);
+  assert.equal(d.revenue.netEgp, 360);
+  assert.equal(d.revenue.netByDay.reduce((s, x) => s + x.value, 0), 360);
+  // Coupon discount given = redeemed rows: 29 + 149 (100% plan) + 160 (40% event) + 400.
+  assert.equal(d.revenue.couponDiscountEgp, 29 + 149 + 160 + 400);
   assert.ok(d.segments.byPlan.plus >= 2);
   assert.equal(d.segments.byRole.admin, 1);
   assert.ok(d.funnel.signedUp >= d.funnel.verified && d.funnel.signedUp >= d.funnel.paid);
