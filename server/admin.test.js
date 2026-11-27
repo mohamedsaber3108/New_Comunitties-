@@ -16,7 +16,7 @@ process.env.WORKER_ENABLED = "false";
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "usam-admin-"));
 process.env.SQLITE_PATH = path.join(temp, "db.sqlite");
 
-const { initDb, sequelize, User } = await import("./db.js");
+const { initDb, sequelize, User, Session } = await import("./db.js");
 const { default: app } = await import("./index.js");
 
 let server, base, adminCookie, memberCookie, superCookie;
@@ -319,4 +319,66 @@ test("/me/network, /me/groups and /me/room-applications return only the caller's
     assert.ok(Array.isArray(mine.body.items), route);
     assert.equal((await req(route)).status, 401, `${route} must require sign-in`);
   }
+});
+
+const login = async (email) =>
+  (await req("/auth/login", "POST", { email, password: "abcdef1234" })).cookie;
+
+test("A-03: role change signs the target out of every session", async () => {
+  await signup("rolechg@example.test");
+  const second = await login("rolechg@example.test");
+  const first = await login("rolechg@example.test");
+  assert.equal((await req("/users/me/sessions", "GET", null, first)).status, 200);
+  assert.equal((await req("/users/me/sessions", "GET", null, second)).status, 200);
+  const target = await User.findOne({ where: { email: "rolechg@example.test" } });
+  const r = await req(`/admin/users/${target.id}`, "PATCH", { action: "set_role", role: "moderator" }, superCookie);
+  assert.equal(r.status, 200);
+  assert.equal((await req("/users/me/sessions", "GET", null, first)).status, 401);
+  assert.equal((await req("/users/me/sessions", "GET", null, second)).status, 401);
+  assert.equal(await Session.count({ where: { UserId: target.id } }), 0);
+  // The audit trail records the revoke with the session count; the acting admin stays signed in.
+  const audit = await req("/admin/audit?pageSize=100", "GET", null, superCookie);
+  assert.equal(audit.status, 200);
+  const row = audit.body.items.find((a) => a.action === "user_sessions_revoked" && /role:moderator/.test(JSON.stringify(a)));
+  assert.ok(row, "user_sessions_revoked audit row");
+  // 3 = the signup session plus the two logins above.
+  assert.match(row.details, /sessions:3/);
+  assert.equal((await req("/users/me/sessions", "GET", null, superCookie)).status, 200);
+});
+
+test("A-03: suspend revokes every session of a user with two logins", async () => {
+  await signup("susp2@example.test");
+  const a = await login("susp2@example.test");
+  const b = await login("susp2@example.test");
+  assert.equal((await req("/users/me/sessions", "GET", null, a)).status, 200);
+  assert.equal((await req("/users/me/sessions", "GET", null, b)).status, 200);
+  const target = await User.findOne({ where: { email: "susp2@example.test" } });
+  const r = await req(`/admin/users/${target.id}`, "PATCH", { action: "suspend", reason: "test" }, adminCookie);
+  assert.equal(r.status, 200);
+  assert.equal((await req("/users/me/sessions", "GET", null, a)).status, 401);
+  assert.equal((await req("/users/me/sessions", "GET", null, b)).status, 401);
+  assert.equal(await Session.count({ where: { UserId: target.id } }), 0);
+});
+
+test("A-03: staff idle and absolute limits apply; members are unaffected", async () => {
+  await signup("staffs@example.test");
+  await signup("memberlong@example.test");
+  await User.update({ role: "moderator" }, { where: { email: "staffs@example.test" } });
+  const idle = await login("staffs@example.test");
+  const old = await login("staffs@example.test");
+  const member = await login("memberlong@example.test");
+  assert.equal((await req("/users/me/sessions", "GET", null, idle)).status, 200);
+  const uid = (await User.findOne({ where: { email: "staffs@example.test" } })).id;
+  const rows = await Session.findAll({ where: { UserId: uid }, order: [["createdAt", "ASC"]] });
+  const hoursAgo = (h) => new Date(Date.now() - h * 3600_000);
+  // rows[1] = `idle` session, rows[2] = `old` session (login order).
+  const idleRow = rows[rows.length - 2];
+  const oldRow = rows[rows.length - 1];
+  await Session.update({ lastSeenAt: hoursAgo(1) }, { where: { id: idleRow.id }, silent: true });
+  await Session.update({ createdAt: hoursAgo(9), lastSeenAt: new Date() }, { where: { id: oldRow.id }, silent: true });
+  assert.equal((await req("/users/me/sessions", "GET", null, idle)).status, 401, "idle > 30 min");
+  assert.equal((await req("/users/me/sessions", "GET", null, old)).status, 401, "age > 8 h");
+  const mid = (await User.findOne({ where: { email: "memberlong@example.test" } })).id;
+  await Session.update({ createdAt: hoursAgo(48), lastSeenAt: hoursAgo(5) }, { where: { UserId: mid }, silent: true });
+  assert.equal((await req("/users/me/sessions", "GET", null, member)).status, 200);
 });

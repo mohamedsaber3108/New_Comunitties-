@@ -15,6 +15,7 @@ for (const k of [
   "RATE_LIMIT_DISABLED", "PAYMOB_ENABLED", "PAYMOB_HMAC_SECRET", "PAYMOB_SECRET_KEY", "PAYMOB_PUBLIC_KEY",
   "EMAIL_PROVIDER", "EMAIL_FROM", "REQUIRE_EMAIL_VERIFICATION", "REGISTRATION_ENABLED", "COOKIE_SECURE",
   "STORAGE_DRIVER", "S3_BUCKET", "SMTP_HOST", "DATABASE_URL", "DB_DIALECT", "DB_HOST", "APP_ORIGIN", "FRONTEND_URL", "STAGING_INSECURE_HTTP",
+  "REQUIRE_ADMIN_MFA", "MFA_ENCRYPTION_KEY", "ALLOW_STAFF_WITHOUT_MFA",
 ]) delete process.env[k];
 const SNAPSHOT = { ...process.env };
 function reset() {
@@ -33,10 +34,46 @@ test("baseline minimal-valid production config passes", async () => {
     COOKIE_SECURE: "true",
     EMAIL_PROVIDER: "ses",
     EMAIL_FROM: "USAM <no-reply@usam.example>",
+    REQUIRE_ADMIN_MFA: "true",
+    MFA_ENCRYPTION_KEY: "ab".repeat(32),
   });
   const { assertProductionConfig } = await freshConfig();
   const check = assertProductionConfig();
   assert.equal(check.ok, true, JSON.stringify(check.errors));
+  reset();
+});
+
+test("staff MFA start guard: refused without the flag, ok with it, escape warns loudly", async () => {
+  const base = {
+    NODE_ENV: "production",
+    DB_DIALECT: "postgres",
+    DATABASE_URL: "postgres://u:p@host/db",
+    APP_ORIGIN: "https://usam.example",
+    FRONTEND_URL: "https://usam.example",
+    COOKIE_SECURE: "true",
+    EMAIL_PROVIDER: "ses",
+    EMAIL_FROM: "USAM <no-reply@usam.example>",
+  };
+  reset();
+  Object.assign(process.env, base);
+  let check = (await freshConfig()).assertProductionConfig();
+  assert.equal(check.ok, false);
+  assert.match(check.errors.join(" | "), /REQUIRE_ADMIN_MFA/);
+  assert.match(check.errors.join(" | "), /MFA_ENCRYPTION_KEY/);
+  // Flag without a key is still refused.
+  reset();
+  Object.assign(process.env, base, { REQUIRE_ADMIN_MFA: "true" });
+  check = (await freshConfig()).assertProductionConfig();
+  assert.equal(check.ok, false);
+  reset();
+  Object.assign(process.env, base, { REQUIRE_ADMIN_MFA: "true", MFA_ENCRYPTION_KEY: "ab".repeat(32) });
+  check = (await freshConfig()).assertProductionConfig();
+  assert.equal(check.ok, true, JSON.stringify(check.errors));
+  reset();
+  Object.assign(process.env, base, { ALLOW_STAFF_WITHOUT_MFA: "true" });
+  check = (await freshConfig()).assertProductionConfig();
+  assert.equal(check.ok, true, JSON.stringify(check.errors));
+  assert.match(check.warnings.join(" | "), /ALLOW_STAFF_WITHOUT_MFA=true/);
   reset();
 });
 
@@ -125,6 +162,8 @@ test("STAGING_INSECURE_HTTP relaxes ONLY the HTTPS checks, and only when set", a
     COOKIE_SECURE: "false",
     EMAIL_PROVIDER: "console",
     REQUIRE_EMAIL_VERIFICATION: "false",
+    REQUIRE_ADMIN_MFA: "true",
+    MFA_ENCRYPTION_KEY: "ab".repeat(32),
   };
   reset();
   Object.assign(process.env, base);

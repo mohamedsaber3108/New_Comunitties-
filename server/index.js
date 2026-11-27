@@ -274,6 +274,16 @@ const publicPlan = (p) => ({
   featuresEn: JSON.parse(p.featuresEn || "[]"),
   featured: p.featured,
 });
+// ROLE_RANK is declared further down; it is only read at request time.
+function staffSessionExpired(session) {
+  const now = Date.now();
+  const created = session.createdAt ? session.createdAt.getTime() : now;
+  const seen = session.lastSeenAt ? session.lastSeenAt.getTime() : created;
+  return (
+    now - created > config.staffSession.maxHours * 3600_000 ||
+    now - seen > config.staffSession.idleMin * 60_000
+  );
+}
 const withUser = async (req, res, next) => {
   try {
     const token = req.cookies.usam_session;
@@ -286,6 +296,17 @@ const withUser = async (req, res, next) => {
         },
         include: User,
       });
+      // Staff sessions (moderator+) have an idle and an absolute limit that
+      // are shorter than the member session. Expired ones are deleted.
+      if (
+        session?.User &&
+        ROLE_RANK[session.User.role] > 0 &&
+        staffSessionExpired(session)
+      ) {
+        await session.destroy();
+        req.session = null;
+        return next();
+      }
       // Reject sessions whose owner was deleted or suspended mid-session.
       if (
         session?.User &&
