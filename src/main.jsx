@@ -6952,7 +6952,9 @@ function AdminApprovalsPanel() {
       title: L("تأكيد الموافقة", "Confirm approval"),
       lines: [
         `${actionName(item.action)}${item.payload?.amountEgp ? ` · ${formatEgp(item.payload.amountEgp, lang)}` : ""}${item.payload?.planCode ? ` · ${item.payload.planCode}` : ""}`,
-        `${L("الهدف", "Target")}: ${item.targetType} ${item.targetId.slice(0, 8)}`,
+        <>
+          {L("الهدف", "Target")}: <bdi dir="ltr">{item.targetType} {item.targetId.slice(0, 8)}</bdi>
+        </>,
         item.action === "refund_payment"
           ? L("سيُرد المبلغ للعضو عبر مزود الدفع. لا يمكن التراجع.", "The money goes back to the member through the payment provider. This cannot be undone.")
           : L("سيُفعّل الاشتراك المدفوع فورًا.", "The paid subscription becomes active now."),
@@ -6995,7 +6997,7 @@ function AdminApprovalsPanel() {
                 <small>
                   {L("الطالب", "Requested by")}: {item.requestedBy?.name || "-"} (
                   <bdi dir="ltr">{item.requestedBy?.email || "-"}</bdi>) · {L("منذ", "age")} {age(item.createdAt)} ·{" "}
-                  {L("الهدف", "Target")}: {item.targetType} <bdi dir="ltr">{item.targetId.slice(0, 8)}</bdi>
+                  {L("الهدف", "Target")}: <bdi dir="ltr">{item.targetType} {item.targetId.slice(0, 8)}</bdi>
                 </small>
                 {item.needsReview && (
                   <p role="note">

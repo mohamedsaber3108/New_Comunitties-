@@ -38,15 +38,32 @@ export function registerApprovalRoutes(app, deps) {
       where: { action, targetId: String(targetId), status: "pending", expiresAt: { [Op.gt]: new Date() } },
     });
     if (dup) return fail(res, 409, "request_already_pending");
-    const item = await ApprovalRequest.create({
-      action,
-      targetType,
-      targetId: String(targetId),
-      payload: JSON.stringify(payload || {}),
-      reason,
-      requestedById: req.user.id,
-      expiresAt: new Date(Date.now() + TTL_MS),
-    });
+    // The checks above are reads, so two requests at the same moment could
+    // both pass them. The partial unique index approval_requests_one_pending
+    // (db.js) lets only one pending row exist per action and target, so the
+    // second create fails and gets the same 409. The unresolved check has no
+    // index; it is safe because a target only reaches needs_review or
+    // approved through the atomic claim() of a single pending row.
+    // An expired-but-unmarked pending row must not hold the unique slot.
+    await ApprovalRequest.update(
+      { status: "expired" },
+      { where: { action, targetId: String(targetId), status: "pending", expiresAt: { [Op.lte]: new Date() } } },
+    );
+    let item;
+    try {
+      item = await ApprovalRequest.create({
+        action,
+        targetType,
+        targetId: String(targetId),
+        payload: JSON.stringify(payload || {}),
+        reason,
+        requestedById: req.user.id,
+        expiresAt: new Date(Date.now() + TTL_MS),
+      });
+    } catch (e) {
+      if (e?.name === "SequelizeUniqueConstraintError") return fail(res, 409, "request_already_pending");
+      throw e;
+    }
     await audit(req, `request_${action}`, targetType, String(targetId), `request:${item.id}`);
     return res.status(201).json({ id: item.id, status: item.status, expiresAt: item.expiresAt });
   };

@@ -592,7 +592,21 @@ export const ApprovalRequest = sequelize.define(
     decisionNote: { type: DataTypes.STRING(500) },
     expiresAt: { type: DataTypes.DATE, allowNull: false },
   },
-  { indexes: [{ fields: ["status", "createdAt"] }, { fields: ["action", "targetId", "status"] }] },
+  {
+    indexes: [
+      { fields: ["status", "createdAt"] },
+      { fields: ["action", "targetId", "status"] },
+      // At most ONE pending request per action and target, enforced by the
+      // database (partial unique index; PostgreSQL and SQLite both support it).
+      // Closes the race between the read check in requestApproval and create.
+      {
+        name: "approval_requests_one_pending",
+        unique: true,
+        fields: ["action", "targetId"],
+        where: { status: "pending" },
+      },
+    ],
+  },
 );
 export const Group = sequelize.define("Group", {
   ...common,

@@ -36,12 +36,13 @@ async function request(route, method = "GET", body, authCookie = cookie) {
 // super_admin approves it. Returns the approval response.
 async function activateVia(subscriptionId) {
   if (!superCookie) {
-    const s = await request(
-      "/auth/signup",
-      "POST",
-      { name: "Second Approver", email: "approver@example.test", password: "StrongPass123!", persona: "launchpad" },
-      null,
-    );
+    // Sign-up no longer starts a session (X-1): sign up, then log in.
+    const s = await signupLogin(request, {
+      name: "Second Approver",
+      email: "approver@example.test",
+      password: "StrongPass123!",
+      persona: "launchpad",
+    });
     await User.update({ role: "super_admin" }, { where: { email: "approver@example.test" } });
     superCookie = s.cookie;
   }
@@ -488,6 +489,13 @@ test("plans, idempotent subscription requests, admin activation and cancellation
   );
   const activated = await activateVia(created.body.subscriptionId);
   assert.equal(activated.body.subscriptionStatus, "active");
+  // An approved activation records executedAt, so it never counts as
+  // "approved but not run" and never blocks a later request for the target.
+  const { ApprovalRequest } = await import("./db.js");
+  const done = await ApprovalRequest.findOne({
+    where: { action: "activate_subscription", targetId: created.body.subscriptionId, status: "approved" },
+  });
+  assert.ok(done && done.executedAt, "activation approval sets executedAt");
   assert.equal(
     (await request("/billing", "GET", undefined, cookie2)).body.subscription
       .status,

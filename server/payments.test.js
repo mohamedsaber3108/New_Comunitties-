@@ -339,6 +339,22 @@ test("refund approval: a provider timeout or 5xx is provider_unknown, goes to ne
   }
 });
 
+test("refund request: only one pending request per payment, even when two arrive together", async () => {
+  const attempt = await paidAttemptFor("onepending@example.test", "pay-key-0000000g1");
+  const body = { amountEgp: 15, reason: "member asked for a refund" };
+  const [a, b] = await Promise.all([
+    req(`/admin/payments/${attempt.id}/refund`, "POST", body, adminCookie),
+    req(`/admin/payments/${attempt.id}/refund`, "POST", body, adminCookie),
+  ]);
+  assert.deepEqual([a.status, b.status].sort(), [201, 409]);
+  assert.equal([a, b].find((x) => x.status === 409).body.error, "request_already_pending");
+  assert.equal(await ApprovalRequest.count({ where: { targetId: attempt.id, status: "pending" } }), 1);
+  // An expired pending row does not hold the slot.
+  await ApprovalRequest.update({ expiresAt: new Date(Date.now() - 1000) }, { where: { targetId: attempt.id, status: "pending" } });
+  const fresh = await req(`/admin/payments/${attempt.id}/refund`, "POST", body, adminCookie);
+  assert.equal(fresh.status, 201);
+});
+
 test("refund approval: an approved row with no executedAt also blocks a new refund request", async () => {
   const attempt = await paidAttemptFor("unexecuted@example.test", "pay-key-0000000e1");
   const asked = await req(`/admin/payments/${attempt.id}/refund`, "POST", { amountEgp: 20, reason: "goodwill refund for outage" }, adminCookie);
