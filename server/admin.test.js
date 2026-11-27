@@ -16,7 +16,7 @@ process.env.WORKER_ENABLED = "false";
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "usam-admin-"));
 process.env.SQLITE_PATH = path.join(temp, "db.sqlite");
 
-const { initDb, sequelize, User, Session } = await import("./db.js");
+const { initDb, sequelize, User, Session, ContactRequest, Report, Post } = await import("./db.js");
 const { default: app } = await import("./index.js");
 
 let server, base, adminCookie, memberCookie, superCookie;
@@ -323,6 +323,49 @@ test("/me/network, /me/groups and /me/room-applications return only the caller's
 
 const login = async (email) =>
   (await req("/auth/login", "POST", { email, password: "abcdef1234" })).cookie;
+
+test("T-21: admin queues page through 120+ rows with no duplicates, even on equal timestamps", async () => {
+  // 120 contact requests, 20 of them sharing one timestamp.
+  const same = new Date(Date.now() - 3600_000);
+  const rows = Array.from({ length: 120 }, (_, i) => ({
+    name: `Pager ${i}`,
+    email: `pager${i}@example.test`,
+    topic: "general",
+    message: "paging test",
+    createdAt: i < 20 ? same : new Date(Date.now() - (i + 2) * 60_000),
+  }));
+  await ContactRequest.bulkCreate(rows);
+  const seen = new Set();
+  let cursor = null, pages = 0;
+  do {
+    const r = await req(`/admin/contact?limit=25${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`, "GET", null, adminCookie);
+    assert.equal(r.status, 200);
+    for (const it of r.body.items) {
+      assert.ok(!seen.has(it.id), "no duplicate across pages");
+      seen.add(it.id);
+    }
+    cursor = r.body.nextCursor;
+    assert.equal(r.body.hasMore, !!cursor);
+    pages++;
+  } while (cursor && pages < 20);
+  const open = await ContactRequest.count({ where: { status: "open" } });
+  assert.equal(seen.size, open, "every open request is reachable");
+  assert.ok(pages >= 5);
+  // A malformed cursor is a 400, not a 500.
+  assert.equal((await req("/admin/contact?cursor=not-a-cursor", "GET", null, adminCookie)).status, 400);
+  // The reports queue uses the same paging (moderator route).
+  const post = await Post.findOne();
+  if (post) {
+    await Report.bulkCreate(Array.from({ length: 60 }, (_, i) => ({ PostId: post.id, reason: `r${i}`, createdAt: same })));
+    const first = await req("/admin/reports?limit=50", "GET", null, adminCookie);
+    assert.equal(first.status, 200);
+    assert.equal(first.body.items.length, 50);
+    assert.ok(first.body.nextCursor);
+    const second = await req(`/admin/reports?limit=50&cursor=${encodeURIComponent(first.body.nextCursor)}`, "GET", null, adminCookie);
+    const ids = new Set([...first.body.items, ...second.body.items].map((x) => x.id));
+    assert.equal(ids.size, first.body.items.length + second.body.items.length);
+  }
+});
 
 test("A-03: role change signs the target out of every session", async () => {
   await signup("rolechg@example.test");

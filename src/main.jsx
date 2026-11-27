@@ -985,6 +985,43 @@ function Loadable({ loading, error, onRetry, children }) {
     );
   return children;
 }
+// Extra pages for a keyset-paged list (T-21). The first page comes from
+// useData; "Load more" appends the next page. A new refresh starts over.
+function useMorePages(base, first, refresh) {
+  const key = `${base}|${refresh}`;
+  const [more, setMore] = useState({ key: null, items: [], cursor: null });
+  const [busy, setBusy] = useState(false);
+  const fresh = more.key === key;
+  const extra = fresh ? more.items : [];
+  const cursor = fresh ? more.cursor : first?.nextCursor || null;
+  async function loadMore() {
+    if (!cursor || busy) return;
+    setBusy(true);
+    try {
+      const sep = base.includes("?") ? "&" : "?";
+      const r = await api(`${base}${sep}cursor=${encodeURIComponent(cursor)}`);
+      setMore({ key, items: [...extra, ...(r.items || [])], cursor: r.nextCursor || null });
+    } finally {
+      setBusy(false);
+    }
+  }
+  return { items: [...(first?.items || []), ...extra], hasMore: !!cursor, loadMore, busy };
+}
+// A "Load more" button that keeps keyboard focus and announces the count.
+function loadMoreRow(list, L) {
+  return (
+    <div className="pagination-row">
+      <span role="status" aria-live="polite">
+        {L(`المعروض: ${list.items.length}`, `Showing ${list.items.length}`)}
+      </span>
+      {list.hasMore && (
+        <button className="button button-outline" disabled={list.busy} onClick={list.loadMore}>
+          {list.busy ? L("جارٍ التحميل…", "Loading…") : L("عرض المزيد", "Load more")}
+        </button>
+      )}
+    </div>
+  );
+}
 function useData(url, refresh = 0, enabled = true) {
   const [data, setData] = useState(null),
     [loading, setLoading] = useState(true),
@@ -7463,6 +7500,8 @@ function AdminPage() {
     mentorsPending = useData("/admin/mentors", refresh),
     challengeList = useData("/challenges", refresh),
     contacts = useData("/admin/contact", refresh),
+    reportList = useMorePages("/admin/reports", reports.data, refresh),
+    contactList = useMorePages("/admin/contact", contacts.data, refresh),
     subscriptions = useData("/admin/subscriptions", refresh);
   const isAdminRole = ["admin", "super_admin"].includes(user.role);
   if (!isAdminRole && user.role !== "moderator")
@@ -7729,8 +7768,9 @@ function AdminPage() {
       )}
       {tab === "reports" && (
         <Loadable loading={reports.loading} error={reports.error}>
-          {reports.data?.items?.length ? (
-            reports.data.items.map((r) => (
+          {reportList.items.length ? (
+            <>
+            {reportList.items.map((r) => (
               <div className="admin-row" key={r.id}>
                 <div>
                   <strong>{r.reason}</strong>
@@ -7749,7 +7789,9 @@ function AdminPage() {
                   </button>
                 </div>
               </div>
-            ))
+            ))}
+            {loadMoreRow(reportList, L)}
+            </>
           ) : (
             <Empty
               icon={Flag}
@@ -7760,8 +7802,9 @@ function AdminPage() {
       )}
       {tab === "contact" && (
         <Loadable loading={contacts.loading} error={contacts.error}>
-          {contacts.data?.items?.length ? (
-            contacts.data.items.map((c) => (
+          {contactList.items.length ? (
+            <>
+            {contactList.items.map((c) => (
               <div className="admin-row" key={c.id}>
                 <div>
                   <strong>
@@ -7776,7 +7819,9 @@ function AdminPage() {
                   {L("إغلاق الطلب", "Close request")}
                 </button>
               </div>
-            ))
+            ))}
+            {loadMoreRow(contactList, L)}
+            </>
           ) : (
             <Empty
               icon={Mail}
