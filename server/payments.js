@@ -403,12 +403,13 @@ export function registerPaymentRoutes(app, deps) {
         const amount = Number(req.body.amountEgp) || attempt.amountEgp;
         if (amount <= 0 || amount > attempt.amountEgp - attempt.refundedAmountEgp)
           return fail(res, 400, "invalid_refund_amount");
-        const out = await issueRefund(attempt, amount, req);
-        if (!out.ok) return fail(res, 502, out.error);
-        res.json({
-          ok: true,
-          refundedAmountEgp: out.refundedAmountEgp,
-          providerConfirmed: out.providerConfirmed,
+        // Two-person rule: this only files a request; a different admin
+        // approves it in /admin/approvals (server/approvals.js).
+        await deps.requestApproval(req, res, {
+          action: "refund_payment",
+          targetType: "payment_attempt",
+          targetId: attempt.id,
+          payload: { amountEgp: amount, paidEgp: attempt.amountEgp, memberId: attempt.UserId },
         });
       } catch (e) {
         next(e);

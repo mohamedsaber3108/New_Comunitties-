@@ -53,7 +53,7 @@ const { initDb, sequelize, User, Subscription, PaymentAttempt, WebhookEvent, Out
 const { runPaymentMaintenance } = await import("./payments.js");
 const { default: app } = await import("./index.js");
 
-let server, base, memberCookie, adminCookie, routeDepsForMaintenance;
+let server, base, memberCookie, adminCookie, admin2Cookie, routeDepsForMaintenance;
 
 async function req(route, method = "GET", body, cookie, headers = {}) {
   const r = await realFetch(base + "/api/v1" + route, {
@@ -106,7 +106,16 @@ before(async () => {
   memberCookie = await signup("payer@example.test");
   adminCookie = await signup("payadmin@example.test");
   await User.update({ role: "admin" }, { where: { email: "payadmin@example.test" } });
+  admin2Cookie = await signup("payadmin2@example.test");
+  await User.update({ role: "admin" }, { where: { email: "payadmin2@example.test" } });
 });
+
+// Two-person refund: one admin requests, a different admin approves.
+async function refundVia(attemptId, body) {
+  const asked = await req(`/admin/payments/${attemptId}/refund`, "POST", { reason: "customer asked for money back", ...body }, adminCookie);
+  if (asked.status !== 201) return asked;
+  return req(`/admin/approvals/${asked.body.id}/approve`, "POST", {}, admin2Cookie);
+}
 after(async () => {
   globalThis.fetch = realFetch;
   server.close();
@@ -227,16 +236,16 @@ test("partial refund keeps the membership; full refund revokes it; provider is r
   // Member cannot refund.
   assert.equal((await req(`/admin/payments/${attempt.id}/refund`, "POST", { amountEgp: 10 }, memberCookie)).status, 403);
 
-  const partial = await req(`/admin/payments/${attempt.id}/refund`, "POST", { amountEgp: 49 }, adminCookie);
+  const partial = await refundVia(attempt.id, { amountEgp: 49 });
   assert.equal(partial.status, 200);
   assert.equal(partial.body.providerConfirmed, true);
   assert.equal((await Subscription.findByPk(attempt.SubscriptionId)).status, "active");
   assert.equal((await PaymentAttempt.findByPk(attempt.id)).refundedAmountEgp, 49);
 
   // Over-refunding is rejected.
-  assert.equal((await req(`/admin/payments/${attempt.id}/refund`, "POST", { amountEgp: 500 }, adminCookie)).status, 400);
+  assert.equal((await refundVia(attempt.id, { amountEgp: 500 })).status, 400);
 
-  const full = await req(`/admin/payments/${attempt.id}/refund`, "POST", { amountEgp: 100 }, adminCookie);
+  const full = await refundVia(attempt.id, { amountEgp: 100 });
   assert.equal(full.status, 200);
   assert.equal((await PaymentAttempt.findByPk(attempt.id)).status, "refunded");
   assert.equal((await Subscription.findByPk(attempt.SubscriptionId)).status, "canceled");
@@ -354,7 +363,7 @@ test("paid event tickets: seat hold, capacity, webhook confirmation, refund rele
   assert.equal(cancel.body.error, "paid_ticket_refund_required");
 
   // Full refund releases the seat; the rival can now buy.
-  const refund = await req(`/admin/payments/${hold.body.paymentAttemptId}/refund`, "POST", {}, adminCookie);
+  const refund = await refundVia(hold.body.paymentAttemptId, {});
   assert.equal(refund.status, 200);
   assert.equal((await Registration.findOne({ where: { EventId: eventId, UserId: buyerUser.id } })).status, "cancelled");
   const second = await req(`/events/${eventId}/register`, "POST", undefined, rival);

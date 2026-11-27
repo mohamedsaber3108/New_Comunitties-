@@ -6613,15 +6613,20 @@ function AdminPaymentsPanel() {
       String(p.amountEgp - p.refundedAmountEgp),
     );
     if (!raw) return;
+    const reason = window.prompt(
+      L("سبب الاسترداد (10 أحرف على الأقل)", "Reason for the refund (at least 10 characters)"),
+    );
+    if (!reason) return;
     try {
-      const r = await api(`/admin/payments/${p.id}/refund`, {
+      await api(`/admin/payments/${p.id}/refund`, {
         method: "POST",
-        body: JSON.stringify({ amountEgp: Number(raw) }),
+        body: JSON.stringify({ amountEgp: Number(raw), reason }),
       });
       setToast(
-        r.providerConfirmed
-          ? L("تم الاسترداد عبر Paymob", "Refunded via Paymob")
-          : L("سُجّل الاسترداد محليًا (لا توجد عملية Paymob)", "Recorded locally (no Paymob charge)"),
+        L(
+          "أُرسل طلب الاسترداد. يحتاج موافقة مشرف آخر في تبويب الموافقات",
+          "Refund request sent. A different admin must approve it in the Approvals tab",
+        ),
       );
       setRefresh((x) => x + 1);
     } catch (e) {
@@ -6688,6 +6693,124 @@ function AdminPaymentsPanel() {
             <button className="button button-outline" disabled={page >= data.totalPages} onClick={() => setPage((x) => x + 1)}>{L("التالي", "Next")}</button>
           </div>
         )}
+      </Loadable>
+    </div>
+  );
+}
+// --- Admin: two-person approvals (manual activation, refunds) --------------
+function AdminApprovalsPanel() {
+  const [, L] = useText();
+  const { setToast, lang, user: currentUser } = useApp();
+  const [now] = useState(() => Date.now());
+  const noteRef = React.useRef(null);
+  const [refresh, setRefresh] = useState(0);
+  const [rejecting, setRejecting] = useState(null);
+  const [note, setNote] = useState("");
+  const { data, loading, error } = useData("/admin/approvals", refresh);
+  // Move focus into the note field when it opens.
+  useEffect(() => {
+    if (rejecting) noteRef.current?.focus();
+  }, [rejecting]);
+  const errorText = (code) =>
+    ({
+      self_approval_forbidden: L("لا يمكنك قرار طلب قدمته أنت", "You cannot decide a request you made yourself"),
+      super_admin_required: L("هذا الطلب يحتاج مشرفًا أعلى", "This request needs a super admin"),
+      request_expired: L("انتهت مهلة الطلب", "This request has expired"),
+      request_not_pending: L("تم البت في الطلب بالفعل", "This request was already decided"),
+      note_required: L("اكتب ملاحظة الرفض", "Write a rejection note"),
+    })[code] || code;
+  async function decide(item, verb) {
+    try {
+      await api(`/admin/approvals/${item.id}/${verb}`, {
+        method: "POST",
+        body: JSON.stringify(verb === "reject" ? { note } : {}),
+      });
+      setRejecting(null);
+      setNote("");
+      setRefresh((x) => x + 1);
+      setToast(verb === "approve" ? L("تمت الموافقة", "Approved") : L("تم الرفض", "Rejected"));
+    } catch (e) {
+      setToast(errorText(e.message));
+    }
+  }
+  const actionName = (a) =>
+    a === "activate_subscription" ? L("تفعيل اشتراك", "Activate subscription") : L("استرداد مبلغ", "Refund payment");
+  const age = (d) => {
+    const h = Math.max(0, Math.floor((now - new Date(d).getTime()) / 3600000));
+    return h < 1 ? L("أقل من ساعة", "under 1 hour") : L(`${h} ساعة`, `${h} h`);
+  };
+  return (
+    <div className="settings-form">
+      <h2>{L("الموافقات", "Approvals")}</h2>
+      <p className="muted">
+        {L(
+          "كل تفعيل يدوي أو استرداد يحتاج موافقة مشرف آخر غير صاحب الطلب.",
+          "Every manual activation or refund needs a different admin to approve it.",
+        )}
+      </p>
+      <Loadable loading={loading} error={error}>
+        {data?.items?.map((item) => {
+          const own = item.requestedBy?.id === currentUser.id;
+          const needsSuper = item.action === "activate_subscription" && currentUser.role !== "super_admin";
+          const blocked = own || needsSuper;
+          return (
+            <div className="admin-row" key={item.id}>
+              <div>
+                <strong>
+                  {actionName(item.action)}
+                  {item.payload?.amountEgp ? ` · ${formatEgp(item.payload.amountEgp, lang)}` : ""}
+                  {item.payload?.planCode ? ` · ${item.payload.planCode}` : ""}
+                </strong>
+                <p>
+                  {L("السبب", "Reason")}: {item.reason}
+                </p>
+                <small>
+                  {L("الطالب", "Requested by")}: {item.requestedBy?.name || "-"} ({item.requestedBy?.email || "-"}) ·{" "}
+                  {L("منذ", "age")} {age(item.createdAt)} · {L("الهدف", "Target")}: {item.targetType} {item.targetId.slice(0, 8)}
+                </small>
+                {own && (
+                  <p role="note">{L("طلبك أنت، يقرره مشرف آخر.", "Your own request. Another admin must decide it.")}</p>
+                )}
+                {!own && needsSuper && (
+                  <p role="note">{L("يقرره مشرف أعلى فقط.", "Only a super admin can decide this one.")}</p>
+                )}
+                {rejecting === item.id && (
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      decide(item, "reject");
+                    }}
+                  >
+                    <label>
+                      {L("ملاحظة الرفض (مطلوبة)", "Rejection note (required)")}
+                      <textarea
+                        value={note}
+                        onChange={(e) => setNote(e.target.value)}
+                        maxLength={500}
+                        required
+                        minLength={3}
+                        ref={noteRef}
+                      />
+                    </label>
+                    <button type="submit">{L("تأكيد الرفض", "Confirm rejection")}</button>{" "}
+                    <button type="button" onClick={() => { setRejecting(null); setNote(""); }}>
+                      {L("إلغاء", "Cancel")}
+                    </button>
+                  </form>
+                )}
+              </div>
+              <div className="admin-perk-actions">
+                <button disabled={blocked} onClick={() => decide(item, "approve")}>
+                  {L("موافقة", "Approve")}
+                </button>
+                <button disabled={blocked} onClick={() => { setRejecting(item.id); setNote(""); }}>
+                  {L("رفض", "Reject")}
+                </button>
+              </div>
+            </div>
+          );
+        })}
+        {data?.items?.length === 0 && <p className="muted">{L("لا توجد طلبات معلقة", "No pending requests")}</p>}
       </Loadable>
     </div>
   );
@@ -7120,16 +7243,20 @@ function AdminPage() {
     }
   }
   async function activateSubscription(id) {
+    const reason = window.prompt(
+      L("سبب التفعيل اليدوي (10 أحرف على الأقل)", "Reason for manual activation (at least 10 characters)"),
+    );
+    if (!reason) return;
     try {
       await api(`/admin/subscriptions/${id}/activate`, {
         method: "PATCH",
-        body: JSON.stringify({ confirmed: true }),
+        body: JSON.stringify({ confirmed: true, reason }),
       });
       setRefresh((x) => x + 1);
       setToast(
         L(
-          "تم تفعيل الاشتراك بعد تأكيد الدفع",
-          "Subscription activated after payment confirmation",
+          "أُرسل الطلب. يحتاج موافقة مشرف أعلى آخر في تبويب الموافقات",
+          "Request sent. A different super admin must approve it in the Approvals tab",
         ),
       );
     } catch (e) {
@@ -7163,6 +7290,7 @@ function AdminPage() {
           ["content", L("المجموعات والغرف", "Groups & rooms")],
           ["plans", L("الخطط", "Plans")],
           ["payments", L("المدفوعات", "Payments")],
+          ["approvals", L("الموافقات", "Approvals")],
           ["coupons", L("أكواد الخصم", "Promo codes")],
           ["analytics", L("التحليلات", "Analytics")],
           ["users", L("المستخدمون", "Users")],
@@ -7250,6 +7378,7 @@ function AdminPage() {
         <AdminPlansPanel refresh={refresh} setRefresh={setRefresh} />
       )}
       {tab === "payments" && <AdminPaymentsPanel />}
+      {tab === "approvals" && <AdminApprovalsPanel />}
       {tab === "coupons" && <AdminCouponsPanel />}
       {tab === "analytics" && <AdminAnalyticsPanel />}
       {tab === "users" && <AdminUsersPanel currentUser={user} />}
@@ -7279,7 +7408,7 @@ function AdminPage() {
                   </small>
                 </div>
                 <button onClick={() => activateSubscription(item.id)}>
-                  {L("تأكيد الدفع والتفعيل", "Confirm payment & activate")}
+                  {L("طلب تفعيل (بعد تأكيد الدفع)", "Request activation (payment confirmed)")}
                 </button>
               </div>
             ))

@@ -54,6 +54,7 @@ import {
   MediaAsset,
   Coupon,
   CouponRedemption,
+  ApprovalRequest,
   publicUser,
   seedReferenceData,
   isPostgres,
@@ -85,6 +86,7 @@ import { registerGoogleRoutes } from "./google.js";
 import { registerCouponRoutes, quoteCoupon, reserveCoupon } from "./coupons.js";
 import { registerAnalyticsRoutes } from "./analytics.js";
 import { registerPaymentRoutes, runPaymentMaintenance } from "./payments.js";
+import { registerApprovalRoutes } from "./approvals.js";
 import { runNotificationDigests } from "./notifications.js";
 import { runHousekeeping } from "./housekeeping.js";
 import paymob from "./paymob.js";
@@ -4046,48 +4048,19 @@ app.patch(
       if (!item) return fail(res, 404, "not_found");
       if (item.status !== "pending_payment" || req.body.confirmed !== true)
         return fail(res, 409, "payment_confirmation_required");
-      const endsAt = new Date();
-      endsAt.setMonth(
-        endsAt.getMonth() + (item.billingCycle === "yearly" ? 12 : 1),
-      );
-      await sequelize.transaction(async (t) => {
-        await Subscription.update(
-          { status: "canceled", canceledAt: new Date() },
-          {
-            where: {
-              UserId: item.UserId,
-              status: "active",
-              id: { [Op.ne]: item.id },
-            },
-            transaction: t,
-          },
-        );
-        await item.update(
-          { status: "active", startsAt: new Date(), endsAt },
-          { transaction: t },
-        );
-        await PaymentAttempt.update(
-          { status: "paid" },
-          {
-            where: { SubscriptionId: item.id, status: "pending" },
-            transaction: t,
-          },
-        );
+      // Two-person rule: this only files a request. A different super_admin
+      // approves it in /admin/approvals (server/approvals.js).
+      await routeDeps.requestApproval(req, res, {
+        action: "activate_subscription",
+        targetType: "subscription",
+        targetId: item.id,
+        payload: {
+          planCode: item.Plan?.code,
+          billingCycle: item.billingCycle,
+          amountEgp: item.amountEgp,
+          memberId: item.UserId,
+        },
       });
-      await audit(
-        req,
-        "activate_paid_subscription",
-        "subscription",
-        item.id,
-        item.Plan.code,
-      );
-      await notify(
-        item.UserId,
-        "subscription_active",
-        "Your USAM Communities subscription is active",
-        "/billing",
-      );
-      res.json({ status: "active", endsAt });
     } catch (e) {
       next(e);
     }
@@ -4264,6 +4237,8 @@ const routeDeps = {
   MediaAsset,
   Coupon,
   CouponRedemption,
+  ApprovalRequest,
+  hasRole,
   // middleware + helpers
   auth,
   admin,
@@ -4289,6 +4264,7 @@ registerCouponRoutes(app, routeDeps);
 registerAnalyticsRoutes(app, routeDeps);
 registerRealtimeRoutes(app, routeDeps);
 registerPaymentRoutes(app, routeDeps);
+registerApprovalRoutes(app, routeDeps);
 registerMediaRoutes(app, routeDeps);
 registerAccountRoutes(app, routeDeps);
 

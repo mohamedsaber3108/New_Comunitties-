@@ -16,7 +16,7 @@ process.env.SQLITE_PATH = path.join(temp, "db.sqlite");
 const { initDb, sequelize, User, Community, Event, Offer, Post, Subscription } =
   await import("./db.js");
 const { default: app } = await import("./index.js");
-let server, base, cookie, cookie2, community;
+let server, base, cookie, cookie2, community, superCookie;
 async function request(route, method = "GET", body, authCookie = cookie) {
   const r = await fetch(base + "/api/v1" + route, {
     method,
@@ -31,6 +31,26 @@ async function request(route, method = "GET", body, authCookie = cookie) {
     body: await r.json(),
     cookie: r.headers.get("set-cookie")?.split(";")[0],
   };
+}
+// Two-person manual activation: the admin files a request, a different
+// super_admin approves it. Returns the approval response.
+async function activateVia(subscriptionId) {
+  if (!superCookie) {
+    const s = await request(
+      "/auth/signup",
+      "POST",
+      { name: "Second Approver", email: "approver@example.test", password: "StrongPass123!", persona: "launchpad" },
+      null,
+    );
+    await User.update({ role: "super_admin" }, { where: { email: "approver@example.test" } });
+    superCookie = s.cookie;
+  }
+  const asked = await request(`/admin/subscriptions/${subscriptionId}/activate`, "PATCH", {
+    confirmed: true,
+    reason: "payment confirmed by bank transfer",
+  });
+  assert.equal(asked.status, 201);
+  return request(`/admin/approvals/${asked.body.id}/approve`, "POST", {}, superCookie);
 }
 before(async () => {
   await initDb();
@@ -452,12 +472,8 @@ test("plans, idempotent subscription requests, admin activation and cancellation
     ).status,
     403,
   );
-  const activated = await request(
-    `/admin/subscriptions/${created.body.subscriptionId}/activate`,
-    "PATCH",
-    { confirmed: true },
-  );
-  assert.equal(activated.body.status, "active");
+  const activated = await activateVia(created.body.subscriptionId);
+  assert.equal(activated.body.subscriptionStatus, "active");
   assert.equal(
     (await request("/billing", "GET", undefined, cookie2)).body.subscription
       .status,
@@ -740,16 +756,7 @@ test("paid member perks enforce access, persist applications and support admin r
   });
   const paidBody = await paidRequest.json();
   assert.equal(paidRequest.status, 202);
-  assert.equal(
-    (
-      await request(
-        `/admin/subscriptions/${paidBody.subscriptionId}/activate`,
-        "PATCH",
-        { confirmed: true },
-      )
-    ).status,
-    200,
-  );
+  assert.equal((await activateVia(paidBody.subscriptionId)).status, 200);
   const unlocked = await request("/perks", "GET", undefined, cookie2);
   assert.equal(unlocked.body.access.eligible, true);
   assert.equal(unlocked.body.access.plan.code, "plus");
