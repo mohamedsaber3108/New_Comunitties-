@@ -18,7 +18,7 @@ process.env.RATE_LIMIT_DISABLED = "true";
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "usam-perm-"));
 process.env.SQLITE_PATH = path.join(temp, "db.sqlite");
 
-const { initDb, sequelize, User } = await import("./db.js");
+const { initDb, sequelize, User, Plan, Subscription, PaymentAttempt, ApprovalRequest } = await import("./db.js");
 const { config } = await import("./config.js");
 const { default: app } = await import("./index.js");
 
@@ -120,7 +120,10 @@ const ADMIN = [
   ["GET", "/admin/perk-applications", "server/index.js:3954"],
   ["PATCH", "/admin/perk-applications/1", "server/index.js:3970"],
   ["GET", "/admin/subscriptions", "server/index.js:4007"],
-  ["PATCH", "/admin/subscriptions/1/activate", "server/index.js:4033"], // manual activation
+  ["PATCH", "/admin/subscriptions/1/activate", "server/index.js:4033"], // manual activation (files a request)
+  ["GET", "/admin/approvals", "server/approvals.js:43"],
+  ["POST", "/admin/approvals/1/approve", "server/approvals.js:116"],
+  ["POST", "/admin/approvals/1/reject", "server/approvals.js:101"],
   ["GET", "/admin/contact", "server/index.js:4096"],
   ["PATCH", "/admin/contact/1", "server/index.js:4109"],
   ["GET", "/admin/organizations", "server/index.js:4147"],
@@ -222,6 +225,101 @@ test("manual subscription activation: with Paymob live, admin -> 403, super_admi
     config.paymob.configured = before.configured;
     config.paymob.enabled = before.enabled;
   }
+});
+
+// ---- Two-person rule (A-02 part 1) -------------------------------------------------
+const REASON = "customer asked, checked with the bank";
+async function paidAttempt(n) {
+  const member = await User.findOne({ where: { email: "member@perm.test" } });
+  return PaymentAttempt.create({
+    idempotencyKey: `perm-key-${n}-0000000000`,
+    amountEgp: 100,
+    status: "paid",
+    UserId: member.id,
+  });
+}
+async function pendingSub(n) {
+  const member = await User.findOne({ where: { email: "member2@perm.test" } });
+  const plan = await Plan.findOne({ where: { code: "plus" } });
+  return Subscription.create({
+    UserId: member.id,
+    PlanId: plan.id,
+    billingCycle: "monthly",
+    status: "pending_payment",
+    amountEgp: 149 + n,
+  });
+}
+const askRefund = (a, cookie = cookies.admin, body = {}) =>
+  req(`/admin/payments/${a.id}/refund`, "POST", { reason: REASON, ...body }, cookie);
+const askActivate = (s, cookie = cookies.super) =>
+  req(`/admin/subscriptions/${s.id}/activate`, "PATCH", { confirmed: true, reason: REASON }, cookie);
+
+test("refund request does nothing until a different admin approves; requester is refused", async () => {
+  const a = await paidAttempt(1);
+  assert.equal((await askRefund(a, cookies.admin, { reason: "short" })).status, 400);
+  const asked = await askRefund(a);
+  assert.equal(asked.status, 201);
+  assert.equal((await PaymentAttempt.findByPk(a.id)).status, "paid", "request alone must not refund");
+  assert.equal((await askRefund(a)).body.error, "request_already_pending");
+  const self = await req(`/admin/approvals/${asked.body.id}/approve`, "POST", {}, cookies.admin);
+  assert.equal(self.status, 403);
+  assert.equal(self.body.error, "self_approval_forbidden");
+  assert.equal((await PaymentAttempt.findByPk(a.id)).status, "paid");
+  const ok = await req(`/admin/approvals/${asked.body.id}/approve`, "POST", {}, cookies.admin2);
+  assert.equal(ok.status, 200);
+  assert.equal((await PaymentAttempt.findByPk(a.id)).status, "refunded");
+  const again = await req(`/admin/approvals/${asked.body.id}/approve`, "POST", {}, cookies.super);
+  assert.equal(again.status, 409);
+  assert.equal(again.body.error, "request_not_pending");
+  const row = await ApprovalRequest.findByPk(asked.body.id);
+  assert.equal(row.status, "approved");
+  assert.notEqual(row.decidedById, row.requestedById);
+});
+
+test("activation: admin cannot approve (super_admin only); requester cannot approve own; other super_admin can", async () => {
+  const s = await pendingSub(1);
+  const asked = await askActivate(s);
+  assert.equal(asked.status, 201);
+  assert.equal((await Subscription.findByPk(s.id)).status, "pending_payment", "request alone must not activate");
+  const byAdmin = await req(`/admin/approvals/${asked.body.id}/approve`, "POST", {}, cookies.admin);
+  assert.equal(byAdmin.status, 403);
+  assert.equal(byAdmin.body.error, "super_admin_required");
+  const self = await req(`/admin/approvals/${asked.body.id}/approve`, "POST", {}, cookies.super);
+  assert.equal(self.status, 403);
+  assert.equal(self.body.error, "self_approval_forbidden");
+  await User.update({ role: "super_admin" }, { where: { email: "admin2@perm.test" } });
+  try {
+    const ok = await req(`/admin/approvals/${asked.body.id}/approve`, "POST", {}, cookies.admin2);
+    assert.equal(ok.status, 200);
+    assert.equal((await Subscription.findByPk(s.id)).status, "active");
+  } finally {
+    await User.update({ role: "admin" }, { where: { email: "admin2@perm.test" } });
+  }
+});
+
+test("an expired request is refused and marked expired", async () => {
+  const a = await paidAttempt(2);
+  const asked = await askRefund(a);
+  await ApprovalRequest.update({ expiresAt: new Date(Date.now() - 1000) }, { where: { id: asked.body.id } });
+  const r = await req(`/admin/approvals/${asked.body.id}/approve`, "POST", {}, cookies.admin2);
+  assert.equal(r.status, 409);
+  assert.equal(r.body.error, "request_expired");
+  assert.equal((await ApprovalRequest.findByPk(asked.body.id)).status, "expired");
+  assert.equal((await PaymentAttempt.findByPk(a.id)).status, "paid");
+});
+
+test("reject needs a note, is audited, and leaves the payment alone; list shows pending only", async () => {
+  const a = await paidAttempt(3);
+  const asked = await askRefund(a);
+  const list = await req("/admin/approvals", "GET", null, cookies.admin2);
+  assert.equal(list.status, 200);
+  assert.ok(list.body.items.some((x) => x.id === asked.body.id && x.requestedBy.email === "admin@perm.test"));
+  assert.equal((await req(`/admin/approvals/${asked.body.id}/reject`, "POST", {}, cookies.admin2)).body.error, "note_required");
+  const rej = await req(`/admin/approvals/${asked.body.id}/reject`, "POST", { note: "not justified" }, cookies.admin2);
+  assert.equal(rej.status, 200);
+  assert.equal((await PaymentAttempt.findByPk(a.id)).status, "paid");
+  const after = await req("/admin/approvals", "GET", null, cookies.admin2);
+  assert.equal(after.body.items.some((x) => x.id === asked.body.id), false);
 });
 
 // ---- Allowed side (proves the 403 tests are not passing because of a broken route) ---

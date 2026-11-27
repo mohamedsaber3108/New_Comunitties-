@@ -561,6 +561,53 @@ export const WebhookEvent = sequelize.define(
   },
   { indexes: [{ unique: true, fields: ["provider", "eventId"] }] },
 );
+// -------------------------------------------------------------------------
+// ApprovalRequest: two-person rule. Manual subscription activation and
+// refunds are requested by one admin and decided by a different one.
+// requestedById / decidedById are plain ids (no FK) so the table is identical
+// whether it came from the baseline sync or migration 0007.
+// -------------------------------------------------------------------------
+export const ApprovalRequest = sequelize.define(
+  "ApprovalRequest",
+  {
+    ...common,
+    action: {
+      type: DataTypes.ENUM("activate_subscription", "refund_payment"),
+      allowNull: false,
+    },
+    targetType: { type: DataTypes.STRING(40), allowNull: false },
+    targetId: { type: DataTypes.STRING(80), allowNull: false },
+    payload: { type: DataTypes.TEXT, defaultValue: "{}" },
+    reason: { type: DataTypes.STRING(500), allowNull: false },
+    requestedById: { type: DataTypes.UUID, allowNull: false },
+    status: {
+      type: DataTypes.ENUM("pending", "approved", "rejected", "expired", "needs_review"),
+      defaultValue: "pending",
+      allowNull: false,
+    },
+    decidedById: { type: DataTypes.UUID },
+    decidedAt: { type: DataTypes.DATE },
+    // Set only when the approved action really ran. approved + null = needs review.
+    executedAt: { type: DataTypes.DATE },
+    decisionNote: { type: DataTypes.STRING(500) },
+    expiresAt: { type: DataTypes.DATE, allowNull: false },
+  },
+  {
+    indexes: [
+      { fields: ["status", "createdAt"] },
+      { fields: ["action", "targetId", "status"] },
+      // At most ONE pending request per action and target, enforced by the
+      // database (partial unique index; PostgreSQL and SQLite both support it).
+      // Closes the race between the read check in requestApproval and create.
+      {
+        name: "approval_requests_one_pending",
+        unique: true,
+        fields: ["action", "targetId"],
+        where: { status: "pending" },
+      },
+    ],
+  },
+);
 export const Group = sequelize.define("Group", {
   ...common,
   slug: { type: DataTypes.STRING(80), allowNull: false, unique: true },
