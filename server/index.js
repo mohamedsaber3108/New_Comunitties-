@@ -337,6 +337,25 @@ const withUser = async (req, res, next) => {
   }
 };
 app.use("/api", withUser);
+// Keyset paging for long admin queues (T-21), newest first and stable when
+// rows share a timestamp: the cursor is "<createdAt ISO>|<id>" of the last row
+// shown. ?limit=1..100 (default 50). Returns { items, hasMore, nextCursor },
+// or null for a malformed cursor.
+async function keysetPage(Model, where, req) {
+  const PAGE = Math.min(100, Math.max(1, Number.parseInt(req.query.limit, 10) || 50));
+  const w = { ...where };
+  if (req.query.cursor) {
+    const [iso, id] = String(req.query.cursor).split("|");
+    const at = new Date(iso);
+    if (Number.isNaN(at.getTime()) || !id || !UUID_RE.test(id)) return null;
+    w[Op.or] = [{ createdAt: { [Op.lt]: at } }, { createdAt: at, id: { [Op.lt]: id } }];
+  }
+  const rows = await Model.findAll({ where: w, order: [["createdAt", "DESC"], ["id", "DESC"]], limit: PAGE + 1 });
+  const hasMore = rows.length > PAGE;
+  const items = rows.slice(0, PAGE);
+  const last = items.at(-1);
+  return { items, hasMore, nextCursor: hasMore ? `${last.createdAt.toISOString()}|${last.id}` : null };
+}
 // 401 for a missing session. "session_ended" when the caller still sent a
 // session cookie, so the UI can say "your session ended, sign in again".
 // The dead cookie is cleared so the notice shows once.
@@ -4127,13 +4146,9 @@ app.patch(
 );
 app.get("/api/v1/admin/contact", auth, admin, async (req, res, next) => {
   try {
-    res.json({
-      items: await ContactRequest.findAll({
-        where: { status: "open" },
-        order: [["createdAt", "DESC"]],
-        limit: 100,
-      }),
-    });
+    const page = await keysetPage(ContactRequest, { status: "open" }, req);
+    if (!page) return fail(res, 400, "invalid_cursor");
+    res.json(page);
   } catch (e) {
     next(e);
   }
@@ -4152,12 +4167,9 @@ app.patch("/api/v1/admin/contact/:id", auth, admin, async (req, res, next) => {
 });
 app.get("/api/v1/admin/reports", auth, moderator, async (req, res, next) => {
   try {
-    res.json({
-      items: await Report.findAll({
-        where: { status: "open" },
-        order: [["createdAt", "DESC"]],
-      }),
-    });
+    const page = await keysetPage(Report, { status: "open" }, req);
+    if (!page) return fail(res, 400, "invalid_cursor");
+    res.json(page);
   } catch (e) {
     next(e);
   }
