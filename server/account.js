@@ -198,6 +198,11 @@ export function registerAccountRoutes(app, deps) {
         return fail(res, 400, "cannot_modify_self");
 
       const action = clean(req.body.action, 30);
+      // Only a super_admin may act on an admin or super_admin account at all
+      // (suspend, reinstate or role change); an admin manages members and
+      // moderators only.
+      if (["admin", "super_admin"].includes(target.role) && req.user.role !== "super_admin")
+        return fail(res, 403, "super_admin_required");
       if (action === "suspend") {
         await target.update({
           status: "suspended",
