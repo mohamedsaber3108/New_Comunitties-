@@ -122,9 +122,10 @@ test("quote: percent and fixed discounts are computed on the server", async () =
   const plans = (await req("/plans")).body.items;
   const proYear = plans.find((p) => p.code === "pro").yearlyEgp;
   assert.equal(fix.body.finalEgp, proYear - 50);
-  // A fixed discount never goes below zero.
+  // A fixed amount that covers the whole price is not a grant (P-05): only
+  // an explicit 100% code may make an item free.
   await createCoupon({ code: "HUGE", discountType: "fixed", value: 99999 });
-  assert.equal((await req("/coupons/quote", "POST", { code: "HUGE", planCode: "plus", billingCycle: "monthly" }, m)).body.finalEgp, 0);
+  assert.equal((await req("/coupons/quote", "POST", { code: "HUGE", planCode: "plus", billingCycle: "monthly" }, m)).body.error, "coupon_above_cap");
   assert.equal((await req("/coupons/quote", "POST", { code: "WELCOME20", planCode: "plus", billingCycle: "monthly" })).status, 401);
 });
 
@@ -298,6 +299,14 @@ test("P-05 guardrails: 40% cap and price floor on the server; 100% grants still 
   const floor = await req("/coupons/quote", "POST", { code: "ATCAP", eventId: cheap.body.id }, m);
   assert.equal(floor.status, 400);
   assert.equal(floor.body.error, "coupon_below_floor");
+  // Same refusal at real event checkout, and nothing is held or charged.
+  const regsBefore = await Registration.count({ where: { EventId: cheap.body.id } });
+  const attemptsBefore = await PaymentAttempt.count();
+  const reg = await req(`/events/${cheap.body.id}/register`, "POST", { couponCode: "ATCAP" }, m);
+  assert.equal(reg.status, 400);
+  assert.equal(reg.body.error, "coupon_below_floor");
+  assert.equal(await Registration.count({ where: { EventId: cheap.body.id } }), regsBefore);
+  assert.equal(await PaymentAttempt.count(), attemptsBefore);
   // A full grant (price 0) is a scholarship: allowed.
   const free = await req("/coupons/quote", "POST", { code: "SCHOLAR", planCode: "plus", billingCycle: "monthly" }, m);
   assert.equal(free.status, 200);

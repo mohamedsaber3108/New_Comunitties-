@@ -26,9 +26,12 @@ import { config } from "./config.js";
 // Guardrails (P-05). A full grant (final price 0) is a scholarship and is
 // allowed; any discount that still leaves something to pay must stay within
 // the cap and keep the price at or above the floor.
-export function checkGuardrails(baseAmount, discountEgp) {
+export function checkGuardrails(baseAmount, discountEgp, coupon) {
   const finalEgp = baseAmount - discountEgp;
-  if (finalEgp <= 0) return null;
+  // Only an explicit 100% code may make an item free (a grant). A fixed
+  // amount that happens to cover the whole price is not a grant.
+  const fullGrant = coupon?.discountType === "percent" && coupon?.value === 100;
+  if (finalEgp <= 0) return fullGrant ? null : "coupon_above_cap";
   const { maxDiscountPct, priceFloorEgp } = config.coupons;
   if (discountEgp * 100 > baseAmount * maxDiscountPct) return "coupon_above_cap";
   if (discountEgp > 0 && finalEgp < priceFloorEgp) return "coupon_below_floor";
@@ -99,7 +102,7 @@ export async function quoteCoupon(models, { code, user, target, baseAmount }, tr
       : Math.min(baseAmount, coupon.value);
   // Checked at every quote and again inside the checkout transaction, so a
   // code created before the cap, or a price change, cannot slip past it.
-  const guard = checkGuardrails(baseAmount, discountEgp);
+  const guard = checkGuardrails(baseAmount, discountEgp, coupon);
   if (guard) return { ok: false, error: guard };
   return {
     ok: true,

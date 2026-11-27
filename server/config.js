@@ -9,6 +9,7 @@
 const bool = (v, fallback = false) =>
   v === undefined ? fallback : String(v).toLowerCase() === "true";
 const num = (v, fallback) => (v === undefined ? fallback : Number(v));
+const finite = (v, fallback) => (v === undefined || v === "" || !Number.isFinite(Number(v)) ? fallback : Number(v));
 const str = (v, fallback = "") => (v === undefined ? fallback : String(v));
 const list = (v) =>
   str(v)
@@ -69,8 +70,9 @@ export const config = {
   // fee plus cost; 10 EGP is a placeholder until real costs are known).
   // A 100% code (price 0) is a scholarship grant: no gateway fee, audited.
   coupons: {
-    maxDiscountPct: num(process.env.COUPON_MAX_DISCOUNT_PCT, 40),
-    priceFloorEgp: num(process.env.COUPON_PRICE_FLOOR_EGP, 10),
+    // A bad value falls back to the default; the cap is kept within 0-100.
+    maxDiscountPct: Math.min(100, Math.max(0, finite(process.env.COUPON_MAX_DISCOUNT_PCT, 40))),
+    priceFloorEgp: Math.max(0, finite(process.env.COUPON_PRICE_FLOOR_EGP, 10)),
   },
 
   // Email (AWS SES by default; console transport in dev/test)
