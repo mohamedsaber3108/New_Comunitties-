@@ -143,6 +143,29 @@ test("user management: admin suspends and reinstates; role grant is super-admin 
   assert.equal(grantBySuper.status, 200);
 });
 
+test("an admin cannot suspend or reinstate an admin or super_admin; a super_admin can", async () => {
+  const superUser = await User.findOne({ where: { email: "super@example.test" } });
+  const adminUser = await User.findOne({ where: { email: "admin@example.test" } });
+  await signup("peeradmin@example.test");
+  await User.update({ role: "admin" }, { where: { email: "peeradmin@example.test" } });
+  const peer = await User.findOne({ where: { email: "peeradmin@example.test" } });
+  for (const target of [superUser, peer]) {
+    for (const action of ["suspend", "reinstate"]) {
+      const r = await req(`/admin/users/${target.id}`, "PATCH", { action, reason: "test" }, adminCookie);
+      assert.equal(r.status, 403, `${action} ${target.email}`);
+      assert.equal(r.body.error, "super_admin_required");
+    }
+  }
+  assert.equal((await User.findByPk(superUser.id)).status, "active");
+  assert.equal((await User.findByPk(peer.id)).status, "active");
+  // A super_admin can suspend and reinstate an admin.
+  assert.equal((await req(`/admin/users/${peer.id}`, "PATCH", { action: "suspend", reason: "test" }, superCookie)).status, 200);
+  assert.equal((await User.findByPk(peer.id)).status, "suspended");
+  assert.equal((await req(`/admin/users/${peer.id}`, "PATCH", { action: "reinstate" }, superCookie)).status, 200);
+  assert.equal((await User.findByPk(peer.id)).status, "active");
+  void adminUser;
+});
+
 test("feature flags: admin can toggle a flag", async () => {
   const put = await req("/admin/feature-flags/test_flag", "PUT", {
     enabled: true,
