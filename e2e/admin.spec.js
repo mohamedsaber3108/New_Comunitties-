@@ -51,7 +51,11 @@ test.describe.serial("admin operations", () => {
     // Super admin promotes the member to moderator; they now see the Admin entry.
     await row.locator("select").selectOption("moderator");
     await expect(row.getByText("moderator · active")).toBeVisible();
-    await target.page.reload();
+    // A role change revokes every session of the target (A-03): they are signed
+    // out, and must sign in again to pick up the new role.
+    await target.page.goto("/settings");
+    await expect(target.page.getByText("Sign in to continue")).toBeVisible();
+    await logIn(target.page, { email: target.email });
     await expect(target.page.getByRole("link", { name: /^admin$/i })).toBeVisible();
 
     // The audit log records each action.
