@@ -3143,7 +3143,7 @@ function MemberProfile() {
         {person ? (
           <div className="profile-card">
             <AvatarImage person={person} />
-            <h2>{person.name}</h2>
+            <h2 dir="auto">{person.name}</h2>
             <p dir="auto">{person.bio}</p>
             <span>
               <MapPin size={16} />
@@ -4405,7 +4405,7 @@ function SearchPage() {
                 className="search-item"
               >
                 <UserRound size={19} />
-                {m.name}
+                <bdi>{m.name}</bdi>
                 <ArrowUpLeft size={16} />
               </Link>
             ))}
@@ -9487,7 +9487,7 @@ function MySubmissions() {
               key={s.id}
             >
               <div>
-                <strong>{s.Challenge?.title}</strong>
+                <strong dir="auto">{s.Challenge?.title}</strong>
                 <p dir="auto">{s.body}</p>
                 <small>
                   {s.status} {s.feedback && `· ${s.feedback}`}
