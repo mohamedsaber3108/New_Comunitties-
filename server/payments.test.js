@@ -33,6 +33,7 @@ process.env.SQLITE_PATH = path.join(temp, "db.sqlite");
 const realFetch = globalThis.fetch;
 const paymobCalls = [];
 let nextTxnId = 9000;
+let refundMode = "ok"; // "ok" | "5xx" | "4xx" | "network"
 globalThis.fetch = async (url, init) => {
   const u = String(url);
   if (!u.startsWith("https://accept.paymob.com")) return realFetch(url, init);
@@ -43,17 +44,21 @@ globalThis.fetch = async (url, init) => {
   if (u.endsWith("/auth/tokens")) return json({ token: "auth-token" });
   if (u.endsWith("/ecommerce/orders")) return json({ id: 5000 + paymobCalls.length });
   if (u.endsWith("/acceptance/payment_keys")) return json({ token: "pay-key-" + body.order_id });
-  if (u.endsWith("/acceptance/void_refund/refund"))
+  if (u.endsWith("/acceptance/void_refund/refund")) {
+    if (refundMode === "5xx") return json({ message: "gateway_down" }, 503);
+    if (refundMode === "4xx") return json({ message: "refund_not_allowed" }, 400);
+    if (refundMode === "network") throw new TypeError("fetch failed");
     return json({ id: ++nextTxnId, success: true, is_refunded: true, amount_cents: body.amount_cents });
+  }
   return json({ message: "not_found" }, 404);
 };
 
-const { initDb, sequelize, User, Subscription, PaymentAttempt, WebhookEvent, OutboxMessage } =
+const { initDb, sequelize, User, Subscription, PaymentAttempt, WebhookEvent, OutboxMessage, ApprovalRequest, AuditLog } =
   await import("./db.js");
 const { runPaymentMaintenance } = await import("./payments.js");
 const { default: app } = await import("./index.js");
 
-let server, base, memberCookie, adminCookie, routeDepsForMaintenance;
+let server, base, memberCookie, adminCookie, admin2Cookie, routeDepsForMaintenance;
 
 async function req(route, method = "GET", body, cookie, headers = {}) {
   const r = await realFetch(base + "/api/v1" + route, {
@@ -106,7 +111,16 @@ before(async () => {
   memberCookie = await signup("payer@example.test");
   adminCookie = await signup("payadmin@example.test");
   await User.update({ role: "admin" }, { where: { email: "payadmin@example.test" } });
+  admin2Cookie = await signup("payadmin2@example.test");
+  await User.update({ role: "admin" }, { where: { email: "payadmin2@example.test" } });
 });
+
+// Two-person refund: one admin requests, a different admin approves.
+async function refundVia(attemptId, body) {
+  const asked = await req(`/admin/payments/${attemptId}/refund`, "POST", { reason: "customer asked for money back", ...body }, adminCookie);
+  if (asked.status !== 201) return asked;
+  return req(`/admin/approvals/${asked.body.id}/approve`, "POST", {}, admin2Cookie);
+}
 after(async () => {
   globalThis.fetch = realFetch;
   server.close();
@@ -227,16 +241,16 @@ test("partial refund keeps the membership; full refund revokes it; provider is r
   // Member cannot refund.
   assert.equal((await req(`/admin/payments/${attempt.id}/refund`, "POST", { amountEgp: 10 }, memberCookie)).status, 403);
 
-  const partial = await req(`/admin/payments/${attempt.id}/refund`, "POST", { amountEgp: 49 }, adminCookie);
+  const partial = await refundVia(attempt.id, { amountEgp: 49 });
   assert.equal(partial.status, 200);
   assert.equal(partial.body.providerConfirmed, true);
   assert.equal((await Subscription.findByPk(attempt.SubscriptionId)).status, "active");
   assert.equal((await PaymentAttempt.findByPk(attempt.id)).refundedAmountEgp, 49);
 
   // Over-refunding is rejected.
-  assert.equal((await req(`/admin/payments/${attempt.id}/refund`, "POST", { amountEgp: 500 }, adminCookie)).status, 400);
+  assert.equal((await refundVia(attempt.id, { amountEgp: 500 })).status, 400);
 
-  const full = await req(`/admin/payments/${attempt.id}/refund`, "POST", { amountEgp: 100 }, adminCookie);
+  const full = await refundVia(attempt.id, { amountEgp: 100 });
   assert.equal(full.status, 200);
   assert.equal((await PaymentAttempt.findByPk(attempt.id)).status, "refunded");
   assert.equal((await Subscription.findByPk(attempt.SubscriptionId)).status, "canceled");
@@ -249,6 +263,162 @@ test("a success callback for a refunded payment cannot resurrect the subscriptio
   const w = signedWebhook(txnFor(attempt.id, 149));
   await req(w.path, "POST", w.body);
   assert.equal((await Subscription.findByPk(attempt.SubscriptionId)).status, "canceled");
+});
+
+// A member with a PAID attempt (via the signed webhook) for the approval tests.
+async function paidAttemptFor(email, key) {
+  const cookie = await signup(email);
+  const started = await startPaidSubscription(cookie, key);
+  assert.equal(started.status, 202);
+  const user = await User.findOne({ where: { email } });
+  const attempt = await PaymentAttempt.findOne({ where: { UserId: user.id } });
+  const w = signedWebhook(txnFor(attempt.id, 149));
+  assert.equal((await req(w.path, "POST", w.body)).status, 200);
+  return PaymentAttempt.findByPk(attempt.id);
+}
+
+test("refund approval: a failure AFTER the provider refund never reopens the request", async () => {
+  const attempt = await paidAttemptFor("afterprov@example.test", "pay-key-0000000a1");
+  const refundCalls = () => paymobCalls.filter((c) => c.url.endsWith("/void_refund/refund")).length;
+  const asked = await req(`/admin/payments/${attempt.id}/refund`, "POST", { amountEgp: 40, reason: "customer asked for money back" }, adminCookie);
+  assert.equal(asked.status, 201);
+  const before = refundCalls();
+  // Make issueRefund's own audit write throw after the provider call succeeded.
+  const realCreate = AuditLog.create;
+  AuditLog.create = async (row, ...rest) => {
+    if (row.action === "refund_payment") throw new Error("audit_down");
+    return realCreate.call(AuditLog, row, ...rest);
+  };
+  let first;
+  try {
+    first = await req(`/admin/approvals/${asked.body.id}/approve`, "POST", {}, admin2Cookie);
+  } finally {
+    AuditLog.create = realCreate;
+  }
+  assert.equal(first.status, 500);
+  assert.equal(refundCalls(), before + 1, "provider was called once");
+  const row = await ApprovalRequest.findByPk(asked.body.id);
+  assert.notEqual(row.status, "pending");
+  assert.equal(row.status, "needs_review");
+  assert.equal(row.executedAt, null);
+  // A second approve is refused, so the provider is not called again.
+  const second = await req(`/admin/approvals/${asked.body.id}/approve`, "POST", {}, admin2Cookie);
+  assert.equal(second.status, 409);
+  assert.equal(second.body.error, "request_not_pending");
+  assert.equal(refundCalls(), before + 1);
+  // super_admin sees it under needs_review; a plain admin does not.
+  assert.equal((await req("/admin/approvals?status=needs_review", "GET", null, adminCookie)).status, 403);
+});
+
+test("refund approval: a provider timeout or 5xx is provider_unknown, goes to needs_review and blocks a new request", async () => {
+  for (const [i, mode] of ["5xx", "network"].entries()) {
+    const attempt = await paidAttemptFor(`unknown${i}@example.test`, `pay-key-0000000d${i}`);
+    const asked = await req(`/admin/payments/${attempt.id}/refund`, "POST", { amountEgp: 30, reason: "member asked for a refund" }, adminCookie);
+    assert.equal(asked.status, 201);
+    refundMode = mode;
+    let r;
+    try {
+      r = await req(`/admin/approvals/${asked.body.id}/approve`, "POST", {}, admin2Cookie);
+    } finally {
+      refundMode = "ok";
+    }
+    assert.equal(r.status, 502, mode);
+    assert.equal(r.body.error, "provider_unknown", mode);
+    const row = await ApprovalRequest.findByPk(asked.body.id);
+    assert.equal(row.status, "needs_review", mode);
+    assert.equal(row.executedAt, null);
+    assert.equal((await PaymentAttempt.findByPk(attempt.id)).refundedAmountEgp, 0, "nothing recorded locally");
+    // The same request cannot be approved again ...
+    const again = await req(`/admin/approvals/${asked.body.id}/approve`, "POST", {}, admin2Cookie);
+    assert.equal(again.status, 409);
+    assert.equal(again.body.error, "request_not_pending");
+    // ... and a new refund request for that payment is refused until reviewed.
+    const second = await req(`/admin/payments/${attempt.id}/refund`, "POST", { amountEgp: 30, reason: "try the refund once more" }, adminCookie);
+    assert.equal(second.status, 409);
+    assert.equal(second.body.error, "refund_review_pending");
+  }
+});
+
+test("refund request: only one pending request per payment, even when two arrive together", async () => {
+  const attempt = await paidAttemptFor("onepending@example.test", "pay-key-0000000g1");
+  const body = { amountEgp: 15, reason: "member asked for a refund" };
+  const [a, b] = await Promise.all([
+    req(`/admin/payments/${attempt.id}/refund`, "POST", body, adminCookie),
+    req(`/admin/payments/${attempt.id}/refund`, "POST", body, adminCookie),
+  ]);
+  assert.deepEqual([a.status, b.status].sort(), [201, 409]);
+  assert.equal([a, b].find((x) => x.status === 409).body.error, "request_already_pending");
+  assert.equal(await ApprovalRequest.count({ where: { targetId: attempt.id, status: "pending" } }), 1);
+  // An expired pending row does not hold the slot.
+  await ApprovalRequest.update({ expiresAt: new Date(Date.now() - 1000) }, { where: { targetId: attempt.id, status: "pending" } });
+  const fresh = await req(`/admin/payments/${attempt.id}/refund`, "POST", body, adminCookie);
+  assert.equal(fresh.status, 201);
+});
+
+test("refund approval: an approved row with no executedAt also blocks a new refund request", async () => {
+  const attempt = await paidAttemptFor("unexecuted@example.test", "pay-key-0000000e1");
+  const asked = await req(`/admin/payments/${attempt.id}/refund`, "POST", { amountEgp: 20, reason: "goodwill refund for outage" }, adminCookie);
+  assert.equal(asked.status, 201);
+  await ApprovalRequest.update({ status: "approved", executedAt: null }, { where: { id: asked.body.id } });
+  const second = await req(`/admin/payments/${attempt.id}/refund`, "POST", { amountEgp: 20, reason: "goodwill refund for outage" }, adminCookie);
+  assert.equal(second.status, 409);
+  assert.equal(second.body.error, "refund_review_pending");
+});
+
+test("refund approval: a clear provider 4xx refusal reopens the request (no money moved)", async () => {
+  const attempt = await paidAttemptFor("refused@example.test", "pay-key-0000000f1");
+  const asked = await req(`/admin/payments/${attempt.id}/refund`, "POST", { amountEgp: 25, reason: "member asked for a refund" }, adminCookie);
+  assert.equal(asked.status, 201);
+  refundMode = "4xx";
+  let r;
+  try {
+    r = await req(`/admin/approvals/${asked.body.id}/approve`, "POST", {}, admin2Cookie);
+  } finally {
+    refundMode = "ok";
+  }
+  assert.equal(r.status, 502);
+  assert.equal(r.body.error, "provider_refund_rejected");
+  assert.equal((await ApprovalRequest.findByPk(asked.body.id)).status, "pending");
+  assert.equal((await PaymentAttempt.findByPk(attempt.id)).refundedAmountEgp, 0);
+});
+
+test("refund approval: success sets executedAt; a changed paid amount is request_stale", async () => {
+  const attempt = await paidAttemptFor("stalerefund@example.test", "pay-key-0000000b1");
+  const ok = await refundVia(attempt.id, { amountEgp: 10 });
+  assert.equal(ok.status, 200);
+  const done = await ApprovalRequest.findOne({ where: { targetId: attempt.id, status: "approved" } });
+  assert.ok(done.executedAt);
+
+  const asked = await req(`/admin/payments/${attempt.id}/refund`, "POST", { amountEgp: 10, reason: "second goodwill refund" }, adminCookie);
+  assert.equal(asked.status, 201);
+  await PaymentAttempt.update({ amountEgp: 150 }, { where: { id: attempt.id } });
+  const calls = paymobCalls.filter((c) => c.url.endsWith("/void_refund/refund")).length;
+  const stale = await req(`/admin/approvals/${asked.body.id}/approve`, "POST", {}, admin2Cookie);
+  assert.equal(stale.status, 409);
+  assert.equal(stale.body.error, "request_stale");
+  assert.equal(paymobCalls.filter((c) => c.url.endsWith("/void_refund/refund")).length, calls, "no provider call");
+  assert.equal((await ApprovalRequest.findByPk(asked.body.id)).status, "pending");
+});
+
+test("activation approval: a plan or price change after the request is request_stale and nothing activates", async () => {
+  const cookie = await signup("staleactivate@example.test");
+  const started = await startPaidSubscription(cookie, "pay-key-0000000c1");
+  assert.equal(started.status, 202);
+  const subId = (await Subscription.findOne({ where: { UserId: (await User.findOne({ where: { email: "staleactivate@example.test" } })).id } })).id;
+  await User.update({ role: "super_admin" }, { where: { email: ["payadmin@example.test", "payadmin2@example.test"] } });
+  try {
+    const asked = await req(`/admin/subscriptions/${subId}/activate`, "PATCH", { confirmed: true, reason: "bank transfer seen" }, adminCookie);
+    assert.equal(asked.status, 201);
+    await Subscription.update({ billingCycle: "yearly" }, { where: { id: subId } });
+    const stale = await req(`/admin/approvals/${asked.body.id}/approve`, "POST", {}, admin2Cookie);
+    assert.equal(stale.status, 409);
+    assert.equal(stale.body.error, "request_stale");
+    assert.equal((await Subscription.findByPk(subId)).status, "pending_payment");
+    // The claim rolled back with the transaction: still pending, still approvable later.
+    assert.equal((await ApprovalRequest.findByPk(asked.body.id)).status, "pending");
+  } finally {
+    await User.update({ role: "admin" }, { where: { email: ["payadmin@example.test", "payadmin2@example.test"] } });
+  }
 });
 
 test("billing history lists the member's own payments only", async () => {
@@ -354,7 +524,7 @@ test("paid event tickets: seat hold, capacity, webhook confirmation, refund rele
   assert.equal(cancel.body.error, "paid_ticket_refund_required");
 
   // Full refund releases the seat; the rival can now buy.
-  const refund = await req(`/admin/payments/${hold.body.paymentAttemptId}/refund`, "POST", {}, adminCookie);
+  const refund = await refundVia(hold.body.paymentAttemptId, {});
   assert.equal(refund.status, 200);
   assert.equal((await Registration.findOne({ where: { EventId: eventId, UserId: buyerUser.id } })).status, "cancelled");
   const second = await req(`/events/${eventId}/register`, "POST", undefined, rival);
