@@ -1,87 +1,56 @@
 # USAM Communities
 
-## Hosted product experience
+React/Vite frontend and Express/Sequelize API for USAM Communities. Updated 2026-11-27 to match the code on main. The live host may run an older release; check its version before relying on any feature below.
 
-The Sites build uses `npm run build`. It serves the same React interface with a
-device-local member space. Membership, posts, comments, bookmarks, profile
-settings and other interactions persist in that browser. The hosted signup does
-not collect a password or email. The separate EC2 source build uses the Express
-API and database; do not treat device-local data as shared production records.
-In this checkout, `npm run dev` previews static `dist`;
-`npm run build:ec2 && node server/index.js` runs the backend locally.
+## What the code does today
 
-The hosted experience includes eight bilingual practical guides, four programs,
-four curated-room formats, partnership pathways, FAQ, member onboarding,
-personal activity and event views, post editing, and a contact form. Hosted
-contact references stay on the current device; in the EC2 source, contact
-requests are saved for review in the admin workspace.
-
-React/Vite frontend and Express/Sequelize API for a new, isolated USAM Communities implementation. This package is intended for an EC2 deployment review. It has **not** been deployed or connected to the existing Hub repository or production services.
-
-## What works in this package
-
-- Arabic and English, RTL/LTR, persistent light/dark preference, responsive public site and member workspace.
-- Four official communities seeded as definitions only; join/leave and member counts persist.
-- Email/password accounts with hashed passwords, server-side sessions in httpOnly cookies, profile and directory opt-in, logout and logout-all.
-- Posts, edits, soft deletion, comments, reactions, bookmarks, follows and a following feed, profile blocking, reporting, and basic admin report resolution.
-- Free events with registration, capacity, waitlist promotion, and cancellation.
-- Challenges with member submissions and admin review; mentors with profile review and request response.
-- Consent-based direct messages between members of a shared community, admin-reviewed organizations, published offers with atomic one-per-account claim limits, member search, notifications, and an operational overview with real counts.
-- Public resources and FAQ, member onboarding and recent activity, registered event list, post edit controls, and an admin-only contact queue.
-- Four EGP membership plans with monthly/annual billing choices, a member billing workspace, idempotent paid activation requests, auditable manual activation, and cancellation. Live Paymob checkout remains disabled until merchant credentials and signed webhooks are configured and tested.
-- Direct links to the USAM products; Jobs stays the source of truth for jobs.
-
-No users, testimonials, attendance, companies, partners, or opportunities are seeded. Public lists render honest empty states until data is published.
+- Arabic and English, RTL/LTR, light/dark theme, responsive public site and member workspace.
+- Accounts: email and password (bcrypt), server-side sessions in an httpOnly cookie, email verification and password reset, sessions list and logout-all, optional TOTP two-factor with recovery codes, Google sign-in code (needs an OAuth client).
+- Sign-up gives the same neutral reply for a new or an existing address and does not sign in; the member signs in after (X-1).
+- Roles: `member` < `moderator` < `admin` < `super_admin` (see `documentation/04-Backend/RBAC.md`). Staff sessions are shorter (30 min idle, 8 h max); a role change or suspension ends every session of that user.
+- Communities, feed with cursor paging, comments, reactions, bookmarks, follows, blocks, reports; post images (content checked by magic bytes, metadata stripped).
+- Realtime messages, read receipts and notifications over Server-Sent Events (one server process).
+- Events (free with waitlist; paid tickets need Paymob), groups, curated rooms, mentors, challenges, organizations with team roles.
+- Plans from the database, subscriptions, billing history, promo codes, platform analytics.
+- Admin: users, roles, plans, promo codes, CMS, feature flags, audit log, background jobs.
+- Paymob checkout, signed webhooks, refunds and reconciliation are built but off until merchant keys exist (`PAYMOB_ENABLED=false`).
+- Email goes through a durable outbox; on `EMAIL_PROVIDER=console` it is only logged. S3 storage is optional; local disk by default.
 
 ## Local development
 
 Requires Node.js 24 and npm. Install with `npm ci`.
 
-For a complete local preview with the API and SQLite:
-
 ```bash
-npm run dev
+npm run dev:full      # build the UI and run the API on http://127.0.0.1:3001 (SQLite)
+npm run dev:api       # API with reload
+npm run dev:ui        # UI with hot reload on http://127.0.0.1:5173
 ```
 
-Open `http://127.0.0.1:3001`. For frontend hot reload, use two terminals instead:
+Local development and tests use SQLite (`data/usam.sqlite`). Production uses **PostgreSQL 16** (`DB_DIALECT=postgres`, `DATABASE_URL`). The code still has a legacy MySQL dialect; it is not the production database.
+
+## Checks
 
 ```bash
-npm run dev:api
+npm test               # server tests (node --test, SQLite)
+npm run test:e2e       # browser tests (Playwright, Chromium)
+npm run lint           # ESLint + jsx-a11y, no new warnings beyond the baseline
+npm run build:ec2      # production UI build
+npm run docs:api       # regenerate docs/API_DOCUMENTATION.md from the router
+npm run db:migrate     # apply migrations (server/migrations)
 ```
 
-```bash
-npm run dev:ui
-```
+CI (`.github/workflows/check.yml`) runs a full-history secret scan, lint, both builds, the API-docs check, a shell-script syntax check, the server tests on SQLite and PostgreSQL, `npm audit` for production dependencies, and the browser tests. Counts change with every PR; read the latest CI run instead of a number in a document.
 
-Then open `http://127.0.0.1:5173`. Local development uses SQLite at `data/usam.sqlite` and automatically creates the local schema and the four official communities. The local SQLite driver is a development dependency; production uses MySQL. To test against isolated MySQL/Redis, use `deploy/docker-compose.dev.yml`, set `DB_DIALECT=mysql`, `DB_HOST=127.0.0.1`, `DB_PORT=3307`, `DB_NAME=usam_hub`, `DB_USER=usam`, and `DB_PASSWORD=local_dev_only`; run `CONFIRM_EMPTY_DB=yes npm run db:bootstrap` against the **new, empty** development database. Redis is in the development stack for future queue and realtime work; the current API does not use it.
+## Read next
 
-Run `npm run check` for the production frontend build and API integration tests. No tests touch production.
-
-## Production boundary
-
-Read [DEPLOYMENT_RUNBOOK.md](docs/DEPLOYMENT_RUNBOOK.md) and [GAP_REGISTER.md](docs/GAP_REGISTER.md) before using EC2. The target in the supplied brief is a separate Hub instance; this package contains no infrastructure changes. Set `REGISTRATION_ENABLED=false` until email verification, recovery and abuse controls are complete. This version is a functional development build, **not an approved public launch**.
-
-
----
-
-## Production readiness (added)
-
-The backend now covers email-verified registration, password recovery, sessions/devices, RBAC (member / moderator / admin / super_admin), dynamic plans, Paymob payments, SES email with a durable outbox, S3 storage, PostgreSQL with versioned migrations, background jobs, audit logging and a hardened Nginx + systemd deployment.
-
-| Read | For |
+| File | For |
 |---|---|
-| `../PRODUCTION_DEPLOYMENT_GUIDE.md` | deploying to AWS (EC2 + RDS + Nginx), backups, monitoring, runbook |
-| `../SECURITY_AUDIT.md` | controls, findings, residual risk |
-| `../TESTING_AND_RELEASE_REPORT.md` | what was tested, results, what was **not** verified |
-| `../FRONTEND_BACKEND_INTEGRATION_MATRIX.md` | every feature and its implemented / UI / test / production state |
-| `../API_DOCUMENTATION.md` | generated endpoint reference (`npm run docs:api`) |
-| `.env.example` | every environment variable |
+| `docs/FINAL_PRODUCT_REPORT.md` | feature status, deployment, what needs external setup |
+| `docs/PRODUCTION_DEPLOYMENT_GUIDE.md` | deploying, backups, monitoring |
+| `docs/SECURITY_AUDIT.md` | controls, findings, X-1 decisions |
+| `docs/API_DOCUMENTATION.md` | generated endpoint list |
+| `docs/GAP_REGISTER.md` | what is still missing |
+| `docs/INTEGRATIONS.md` | outside systems and their state |
+| `.env.example` | every environment variable (names and safe defaults) |
 
-```bash
-npm ci
-npm test               # 96 server tests (SQLite)
-npm run test:e2e       # 15 real-browser tests (needs Edge or Chrome)
-npm run db:migrate     # apply migrations (PostgreSQL in production)
-npm run create:admin   # first administrator (see deployment guide)
-```
-**Nothing here has been deployed or exercised with real Paymob / AWS credentials.** See the testing report for exactly what is and is not verified.
+Nothing here has been exercised with real Paymob, SES, Google or S3 credentials.
