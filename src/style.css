@@ -2479,14 +2479,16 @@ strong {
   .app-main {
     padding: 28px 20px 90px;
   }
+  /* minmax(0, ...) lets a column shrink below its widest child (the
+     scrolling filter row), so the page does not scroll sideways (T-15). */
   .dashboard-grid,
   .feed-layout {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
   .dashboard-aside,
   .feed-aside {
     display: grid;
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 12px;
   }
   .dashboard-aside .mini-panel {
@@ -4050,7 +4052,7 @@ strong {
   .pricing-grid,
   .pricing-notes,
   .checkout-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
   .pricing-card {
     min-height: auto;
@@ -5057,3 +5059,14 @@ strong {
 .analytics-seg-row { display: grid; grid-template-columns: 1fr 2fr auto; align-items: center; gap: 8px; font-size: 13px; padding: 3px 0; }
 .analytics-seg-bar { block-size: 8px; border-radius: 99px; background: var(--soft); overflow: hidden; }
 .analytics-seg-bar i { display: block; block-size: 100%; background: var(--accent); }
+
+/* T-15: Arabic letters join, so any letter-spacing (the tight negative
+   heading values or the wide label values above) breaks the words apart.
+   In Arabic the whole UI uses normal spacing; English keeps its design.
+   Latin brand words in the Arabic UI lose their wide tracking too (UX judge
+   to confirm); key caps (kbd) keep theirs. */
+html[lang="ar"] *:not(kbd),
+html[lang="ar"] *:not(kbd)::before,
+html[lang="ar"] *:not(kbd)::after {
+  letter-spacing: normal !important;
+}
