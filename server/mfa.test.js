@@ -8,7 +8,7 @@ import path from "node:path";
 import fs from "node:fs";
 process.env.NODE_ENV = "test";
 process.env.DB_DIALECT = process.env.TEST_DB_DIALECT || "sqlite";
-const { prepareTestDatabase } = await import("./test-support.js");
+const { prepareTestDatabase, signupLogin } = await import("./test-support.js");
 const dropTestDb = await prepareTestDatabase();
 process.env.WORKER_ENABLED = "false";
 process.env.RATE_LIMIT_DISABLED = "true";
@@ -32,8 +32,8 @@ async function req(route, method = "GET", body, cookie) {
 }
 const PW = "abcdef1234";
 async function signup(email) {
-  const r = await req("/auth/signup", "POST", { name: "Mfa User", email, password: PW, persona: "launchpad" });
-  assert.equal(r.status, 201);
+  const r = await signupLogin(req, { name: "Mfa User", email, password: PW, persona: "launchpad" });
+  assert.equal(r.status, 200);
   await User.update({ emailVerified: true }, { where: { email } });
   return r.cookie;
 }

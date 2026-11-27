@@ -8,7 +8,7 @@ import path from "node:path";
 import fs from "node:fs";
 process.env.NODE_ENV = "test";
 process.env.DB_DIALECT = process.env.TEST_DB_DIALECT || "sqlite";
-const { prepareTestDatabase } = await import("./test-support.js");
+const { prepareTestDatabase, signupLogin } = await import("./test-support.js");
 const dropTestDb = await prepareTestDatabase();
 process.env.REQUIRE_EMAIL_VERIFICATION = "false";
 process.env.WORKER_ENABLED = "false";
@@ -34,7 +34,7 @@ async function req(route, method = "GET", body, who_) {
 }
 async function signup(key, role) {
   const email = `${key}@example.test`;
-  const r = await req("/auth/signup", "POST", { name: `User ${key}`, email, password: "abcdef1234", persona: "launchpad" });
+  const r = await signupLogin(req, { name: `User ${key}`, email, password: "abcdef1234", persona: "launchpad" });
   who[key] = { cookie: r.cookie, id: r.body.user.id, username: r.body.user.username, email };
   if (role) await User.update({ role }, { where: { email } });
   return who[key];

@@ -9,7 +9,7 @@ import path from "node:path";
 import fs from "node:fs";
 process.env.NODE_ENV = "test";
 process.env.DB_DIALECT = process.env.TEST_DB_DIALECT || "sqlite";
-const { prepareTestDatabase } = await import("./test-support.js");
+const { prepareTestDatabase, signupLogin } = await import("./test-support.js");
 const dropTestDb = await prepareTestDatabase();
 process.env.WORKER_ENABLED = "false";
 process.env.RATE_LIMIT_DISABLED = "true";
@@ -29,7 +29,7 @@ async function req(route, method = "GET", body, cookie) {
   return { status: r.status, body: await r.json().catch(() => ({})), cookie: r.headers.get("set-cookie")?.split(";")[0] };
 }
 async function member(email) {
-  const r = await req("/auth/signup", "POST", { name: "RT " + email.split("@")[0], email, password: "abcdef1234", persona: "launchpad" });
+  const r = await signupLogin(req, { name: "RT " + email.split("@")[0], email, password: "abcdef1234", persona: "launchpad" });
   await User.update({ emailVerified: true }, { where: { email } });
   await req("/me", "PATCH", { messagesEnabled: true, discoverable: true }, r.cookie);
   await req("/communities/launchpad/join", "POST", undefined, r.cookie);

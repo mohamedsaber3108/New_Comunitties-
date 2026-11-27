@@ -35,7 +35,7 @@ _Method: code review of every route and middleware, automated attack-style tests
 
 - **Two-factor (TOTP, RFC 6238)**: enrolment in Settings; sign-in then requires `mfaCode` (authenticator code or single-use recovery code). Secret encrypted at rest (AES-256-GCM, `MFA_ENCRYPTION_KEY`); an accepted time step cannot be reused; recovery codes stored as SHA-256 hashes; disabling or regenerating codes needs password + a valid code; failed codes count toward the account lockout; a wrong password never reveals whether MFA is on. `REQUIRE_ADMIN_MFA=true` blocks moderator/admin/super_admin routes (`403 mfa_setup_required`) until enrolled and forbids staff from disabling it. Evidence: `mfa.test.js` (8 tests incl. RFC vectors), `e2e/mfa.spec.js`. **Not covered:** QR-code rendering (manual key entry / otpauth link only), WebAuthn, lost-device recovery by an admin (use `create:admin` or a DB reset of the MFA columns), losing `MFA_ENCRYPTION_KEY` (invalidates all enrolments).
 
-**Known weaknesses.** (a) MFA is opt-in for members and enforceable for staff, but staff enforcement is OFF by default (`REQUIRE_ADMIN_MFA=false`) - turn it on before launch. (b) `POST /auth/signup` returns `409 email_taken`, which allows email enumeration at signup (a common usability trade-off; throttled). (c) Sessions are not rotated on privilege change (role changes take effect on the next request because the role is read from the DB each time).
+**Known weaknesses.** (a) MFA is opt-in for members and enforceable for staff, but staff enforcement is OFF by default (`REQUIRE_ADMIN_MFA=false`) - turn it on before launch. (b) ~~`POST /auth/signup` returns `409 email_taken`~~ fixed by X-1, see the "X-1 decisions" section. (c) Sessions are not rotated on privilege change (role changes take effect on the next request because the role is read from the DB each time).
 
 ## 3. Authorization
 - Hierarchy `member < moderator < admin < super_admin`, enforced by middleware (`auth`, `moderator`, `admin`, `superAdmin`) and an in-handler `hasRole()` helper. **No handler compares role strings directly** any more (that pattern had locked out super_admin and left moderators powerless).
@@ -63,7 +63,7 @@ _Method: code review of every route and middleware, automated attack-style tests
 - Open redirects: none (post-login redirect is an in-app path).
 
 ## 6. Files, media, email
-- **Uploads**: PNG/JPEG/WebP/GIF only, **magic bytes must match the declared type** (HTML/PHP/SVG disguised as images are rejected), size cap, server-generated random key (client filename never used), served with `nosniff` and a sandbox CSP in local mode. The browser re-encodes avatars, stripping EXIF/GPS. **Gap:** no server-side re-encode or malware scan; if user media expands beyond avatars, add a scanning step (e.g. S3 + GuardDuty Malware Protection, or `sharp` re-encode).
+- **Uploads**: PNG/JPEG/WebP/GIF only, **magic bytes must match the declared type** (HTML/PHP/SVG disguised as images are rejected), size cap, server-generated random key (client filename never used), served with `nosniff` and a sandbox CSP in local mode. The browser re-encodes avatars, stripping EXIF/GPS. Since X-1 the real type comes from the bytes, not the declared type (see "X-1 decisions"). **Gap:** no external malware scanner and no server re-encode; if user media expands beyond images, add a scanning step (e.g. S3 + GuardDuty Malware Protection).
 - **Email**: queued in a durable outbox with retry/backoff/dead-letter; templates escape values; password-reset and verification links contain only an unguessable token; Neither the app nor Nginx logs request bodies or query strings (Nginx uses a path-only `log_format`; verified by `scripts/nginx-integration.sh`). SES sender must be a verified identity (enforced by config check).
 
 ## 7. Payments
@@ -104,10 +104,22 @@ Recommended: enable Dependabot/Renovate and run `npm audit --omit=dev` in CI.
 1. **Set `REQUIRE_ADMIN_MFA=true` and `MFA_ENCRYPTION_KEY`** and enrol every staff account (TOTP is built and tested; it is not yet enforced by default). Consider WebAuthn later.
 2. Run an **independent penetration test** before opening registration publicly.
 3. **Rate-limit store** is in-process: correct for one node; move to Redis before adding a second instance.
-4. Add a **CAPTCHA/proof-of-work** on signup/forgot-password if bot signups appear.
-5. Upload scanning / server-side re-encode if media features grow.
+4. **CAPTCHA/proof-of-work** on signup/forgot-password: deferred, review 2027-03-01 (see "X-1 decisions").
+5. External upload scanning if media features grow beyond images.
 6. Switch CSP to include `report-to` (collect violations) and consider removing `style-src 'unsafe-inline'` by moving inline styles to classes.
 7. Restrict manual subscription activation to `super_admin` once Paymob is live.
 8. Notify users by email on password change from a new device / account lockout (password-change email exists; lockout email does not).
 9. Document and rehearse incident response (key rotation: `PAYMOB_*`, DB password, session invalidation by truncating `Sessions`).
 10. WCAG audit with assistive technologies (not performed).
+
+## 12. X-1 decisions (2026-11-27)
+Default taken from QUESTIONS Q-04; the owner may change it.
+
+| Gap | Decision | Detail |
+|---|---|---|
+| Email enumeration (`409 email_taken` on sign-up) | **FIX** | `POST /auth/signup` returns the same `202 { ok, next: "check_email" }` for a new and an existing address. No session is issued; the member signs in after sign-up. An existing account is not changed. Its owner gets the email `signupAttemptExisting` ("someone tried to sign up with your address; sign in or reset your password"). A password is still hashed so timing is similar. The UI shows one neutral Arabic/English message with sign-in and reset links. A race between two sign-ups for one address gets the same reply. |
+| No CAPTCHA | **DEFER** | Keep the existing sign-up rate limit (per IP + email, 30 per 15 minutes). Add a CAPTCHA only if bot sign-ups appear. Review date **2027-03-01**. If added, it must have an accessible path with no puzzle-only step. |
+| No upload malware scan | **FIX by content check** | The real image type is read from the file's magic bytes (JPEG, PNG, WebP, GIF). The declared type and file name are ignored. Anything else is refused `400 unsupported_image` with a plain Arabic/English message. EXIF/metadata stripping is kept. No external scanner and no new dependency. |
+
+Residual: a file can still carry a valid image header with odd data after it. The bytes are stored as an image and served with `nosniff`; an external scanner stays an option if media grows.
+Tests: `server/identity.test.js`, `server/api.test.js` (existing address), `server/media.test.js` (text renamed `.png` refused, real PNG passes), `e2e/journey.spec.js`.
