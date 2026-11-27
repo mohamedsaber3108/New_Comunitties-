@@ -63,6 +63,16 @@ export const config = {
     maxHours: num(process.env.STAFF_SESSION_MAX_HOURS, 8),
   },
 
+  // Coupon guardrails (P-05, PRICING_RESEARCH s.8 and 12a). Defaults taken,
+  // owner may change: a partial discount is at most 40% of the price, and a
+  // discounted price that is still paid may not drop below the floor (gateway
+  // fee plus cost; 10 EGP is a placeholder until real costs are known).
+  // A 100% code (price 0) is a scholarship grant: no gateway fee, audited.
+  coupons: {
+    maxDiscountPct: num(process.env.COUPON_MAX_DISCOUNT_PCT, 40),
+    priceFloorEgp: num(process.env.COUPON_PRICE_FLOOR_EGP, 10),
+  },
+
   // Email (AWS SES by default; console transport in dev/test)
   email: {
     provider: str(process.env.EMAIL_PROVIDER, "console"), // console | ses | smtp

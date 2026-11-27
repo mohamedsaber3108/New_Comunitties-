@@ -21,6 +21,19 @@
 //   - codes are case-insensitive; guessing is rate limited
 // -------------------------------------------------------------------------
 import { createLimiter } from "./ratelimit.js";
+import { config } from "./config.js";
+
+// Guardrails (P-05). A full grant (final price 0) is a scholarship and is
+// allowed; any discount that still leaves something to pay must stay within
+// the cap and keep the price at or above the floor.
+export function checkGuardrails(baseAmount, discountEgp) {
+  const finalEgp = baseAmount - discountEgp;
+  if (finalEgp <= 0) return null;
+  const { maxDiscountPct, priceFloorEgp } = config.coupons;
+  if (discountEgp * 100 > baseAmount * maxDiscountPct) return "coupon_above_cap";
+  if (discountEgp > 0 && finalEgp < priceFloorEgp) return "coupon_below_floor";
+  return null;
+}
 
 const CODE_RE = /^[A-Z0-9][A-Z0-9_-]{2,39}$/;
 export const normalizeCode = (v) => String(v || "").trim().toUpperCase();
@@ -84,6 +97,10 @@ export async function quoteCoupon(models, { code, user, target, baseAmount }, tr
     coupon.discountType === "percent"
       ? Math.min(baseAmount, Math.floor((baseAmount * coupon.value) / 100))
       : Math.min(baseAmount, coupon.value);
+  // Checked at every quote and again inside the checkout transaction, so a
+  // code created before the cap, or a price change, cannot slip past it.
+  const guard = checkGuardrails(baseAmount, discountEgp);
+  if (guard) return { ok: false, error: guard };
   return {
     ok: true,
     coupon,
@@ -188,6 +205,12 @@ export function registerCouponRoutes(app, deps) {
   });
 
   // ---- Admin ---------------------------------------------------------------
+  // A percent code above the cap is refused at creation, except 100%
+  // (a scholarship grant). Fixed codes are checked against the real price
+  // at quote time by checkGuardrails.
+  const percentAboveCap = (type, value) =>
+    type === "percent" && value < 100 && value > config.coupons.maxDiscountPct;
+
   function parseCouponBody(body, { partial }) {
     const out = {};
     const errors = [];
@@ -263,6 +286,7 @@ export function registerCouponRoutes(app, deps) {
     try {
       const { out, errors } = parseCouponBody(req.body, { partial: false });
       if (errors.length) return res.status(400).json({ error: "invalid_coupon", fields: errors });
+      if (percentAboveCap(out.discountType, out.value)) return fail(res, 400, "coupon_above_cap");
       if (await Coupon.findOne({ where: { code: out.code } })) return fail(res, 409, "coupon_code_taken");
       const c = await Coupon.create(out);
       await audit(req, "create_coupon", "coupon", c.id, `${c.code}:${c.discountType}:${c.value}`);
@@ -288,6 +312,8 @@ export function registerCouponRoutes(app, deps) {
         if ((out.code ?? c.code) !== c.code || (out.discountType ?? c.discountType) !== c.discountType || (out.value ?? c.value) !== c.value)
           return fail(res, 409, "coupon_in_use_terms_locked");
       }
+      if ((out.value !== undefined || out.discountType !== undefined) && percentAboveCap(out.discountType ?? c.discountType, out.value ?? c.value))
+        return fail(res, 400, "coupon_above_cap");
       if (out.code && out.code !== c.code && (await Coupon.findOne({ where: { code: out.code } })))
         return fail(res, 409, "coupon_code_taken");
       const s = out.startsAt !== undefined ? out.startsAt : c.startsAt;
