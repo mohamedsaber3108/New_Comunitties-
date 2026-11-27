@@ -442,7 +442,8 @@ export function registerPaymentRoutes(app, deps) {
         // A timeout, network error or 5xx is ambiguous: the refund may have
         // gone through, so the caller must not retry it blindly.
         const s = Number(err?.paymobStatus);
-        if (s >= 400 && s < 500) return { ok: false, error: "provider_refund_rejected" };
+        // 408 (request timeout) is a timeout, so it stays ambiguous.
+        if (s >= 400 && s < 500 && s !== 408) return { ok: false, error: "provider_refund_rejected" };
         return { ok: false, error: "provider_unknown", ambiguous: true };
       }
     }
