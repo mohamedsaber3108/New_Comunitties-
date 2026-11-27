@@ -307,6 +307,7 @@ const withUser = async (req, res, next) => {
       ) {
         await session.destroy();
         req.session = null;
+        req.sessionEnded = true;
         return next();
       }
       // Reject sessions whose owner was deleted or suspended mid-session.
@@ -326,6 +327,9 @@ const withUser = async (req, res, next) => {
       } else {
         req.session = null;
       }
+      // A cookie was sent but no live session matches it: the session ended
+      // (expired, revoked on role change or suspension, staff limit).
+      if (!req.user) req.sessionEnded = true;
     }
     next();
   } catch (e) {
@@ -333,6 +337,14 @@ const withUser = async (req, res, next) => {
   }
 };
 app.use("/api", withUser);
+// 401 for a missing session. "session_ended" when the caller still sent a
+// session cookie, so the UI can say "your session ended, sign in again".
+// The dead cookie is cleared so the notice shows once.
+const signInRequired = (req, res) => {
+  if (!req.sessionEnded) return fail(res, 401, "sign_in_required");
+  res.clearCookie(SESSION_COOKIE, cookieOptions({ maxAge: 0 }));
+  return fail(res, 401, "session_ended");
+};
 // Per-member write throttle (runs after withUser so it can key on the user).
 app.use("/api", (req, res, next) =>
   ["GET", "HEAD", "OPTIONS"].includes(req.method)
@@ -343,7 +355,7 @@ app.use("/api", (req, res, next) =>
 // Role hierarchy: member < moderator < admin < super_admin.
 const ROLE_RANK = { member: 0, moderator: 1, admin: 2, super_admin: 3 };
 const atLeast = (role) => (req, res, next) => {
-  if (!req.user) return fail(res, 401, "sign_in_required");
+  if (!req.user) return signInRequired(req, res);
   if (ROLE_RANK[req.user.role] < ROLE_RANK[role]) return fail(res, 403, "forbidden");
   // Privileged staff must have enrolled in two-factor auth when the
   // deployment requires it (REQUIRE_ADMIN_MFA=true).
@@ -352,7 +364,7 @@ const atLeast = (role) => (req, res, next) => {
   next();
 };
 const auth = (req, res, next) =>
-  req.user ? next() : fail(res, 401, "sign_in_required");
+  req.user ? next() : signInRequired(req, res);
 // `admin` now admits super_admin as well (strictly higher privilege).
 const admin = atLeast("admin");
 const moderator = atLeast("moderator");
@@ -378,7 +390,7 @@ const requireFlag = (key) => async (req, res, next) => {
 // Gate that requires a verified email for sensitive member actions. When
 // REQUIRE_EMAIL_VERIFICATION is off (dev), it is a pass-through.
 const requireVerified = (req, res, next) => {
-  if (!req.user) return fail(res, 401, "sign_in_required");
+  if (!req.user) return signInRequired(req, res);
   if (!config.requireEmailVerification) return next();
   if (req.user.emailVerified) return next();
   return fail(res, 403, "email_verification_required");
@@ -1426,7 +1438,7 @@ app.get("/api/v1/posts", async (req, res, next) => {
       where.CommunityId = c.id;
     }
     if (req.query.mode === "following") {
-      if (!req.user) return fail(res, 401, "sign_in_required");
+      if (!req.user) return signInRequired(req, res);
       const follows = await Follow.findAll({
         where: { FollowerId: req.user.id },
         attributes: ["FollowingId"],
