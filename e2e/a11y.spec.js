@@ -32,7 +32,8 @@ async function scan(page, url, lang, width) {
   await page.goto(url);
   // Signed-in pages keep polling, so network idle never comes. Wait for real
   // content instead: a heading is shown and no loading skeleton is left.
-  await page.locator("h1, h2").first().waitFor();
+  // :visible so a hidden heading (a closed drawer) cannot pass the wait early.
+  await page.locator("h1:visible, h2:visible").first().waitFor();
   await expect(page.locator(".skeleton-grid")).toHaveCount(0);
   const [docLang, dir] = await page.evaluate(() => [document.documentElement.lang, document.documentElement.dir]);
   // evaluate() runs through the browser protocol, so the app CSP (script-src
