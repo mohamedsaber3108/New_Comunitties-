@@ -13,7 +13,7 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 process.env.NODE_ENV = "test";
 process.env.DB_DIALECT = process.env.TEST_DB_DIALECT || "sqlite";
-const { prepareTestDatabase } = await import("./test-support.js");
+const { prepareTestDatabase, signupLogin } = await import("./test-support.js");
 const dropTestDb = await prepareTestDatabase();
 process.env.REQUIRE_EMAIL_VERIFICATION = "true";
 process.env.WORKER_ENABLED = "false";
@@ -81,8 +81,8 @@ after(async () => {
 
 test("JOURNEY: a new member goes from sign-up to a paid, entitled, then departed account", async () => {
   // ---- 1. Register (unverified) --------------------------------------
-  const reg = await req("/auth/signup", "POST", { name: "Journey Member", email: "journey@example.test", password: "abcdef1234", persona: "launchpad" });
-  assert.equal(reg.status, 201);
+  const reg = await signupLogin(req, { name: "Journey Member", email: "journey@example.test", password: "abcdef1234", persona: "launchpad" });
+  assert.equal(reg.status, 200);
   assert.equal(reg.body.user.emailVerified, false);
   jar.me = { cookie: reg.cookie, id: reg.body.user.id, username: reg.body.user.username };
 
@@ -118,7 +118,7 @@ test("JOURNEY: a new member goes from sign-up to a paid, entitled, then departed
   assert.equal(mine.reactionsCount, 1);
 
   // ---- 5. Event: admin publishes, member registers, ticket, check-in -
-  const adminReg = await req("/auth/signup", "POST", { name: "Admin", email: "jadmin@example.test", password: "abcdef1234", persona: "launchpad" });
+  const adminReg = await signupLogin(req, { name: "Admin", email: "jadmin@example.test", password: "abcdef1234", persona: "launchpad" });
   await User.update({ role: "admin", emailVerified: true }, { where: { email: "jadmin@example.test" } });
   jar.admin = { cookie: adminReg.cookie };
   const ev = await req("/admin/events", "POST", { title: "Founders Meetup", startsAt: new Date(Date.now() + 5 * 86400000).toISOString(), capacity: 20, community: "launchpad", description: "Monthly meetup" }, jar.admin);

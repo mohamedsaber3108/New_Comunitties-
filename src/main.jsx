@@ -1389,6 +1389,7 @@ function Auth({ mode = "login", prompt, redirect }) {
     }),
     [error, setError] = useState(""),
     [needMfa, setNeedMfa] = useState(false),
+    [sent, setSent] = useState(false),
     [busy, setBusy] = useState(false);
   const navigate = useNavigate(),
     location = useLocation();
@@ -1432,6 +1433,11 @@ function Auth({ mode = "login", prompt, redirect }) {
         method: "POST",
         body: JSON.stringify(form),
       });
+      if (result?.next === "check_email") {
+        // Same reply for new and existing addresses (no email enumeration).
+        setSent(true);
+        return;
+      }
       setUser(result.user);
       setToast(
         signup || PREVIEW_MODE
@@ -1460,10 +1466,6 @@ function Auth({ mode = "login", prompt, redirect }) {
           account_locked: L(
             "محاولات كثيرة؛ حاول بعد ١٥ دقيقة",
             "Too many attempts; try again in 15 minutes",
-          ),
-          email_taken: L(
-            "البريد الإلكتروني مستخدم بالفعل",
-            "This email is already in use",
           ),
           invalid_signup: L(
             "راجع البيانات؛ كلمة المرور ١٠ أحرف على الأقل",
@@ -1508,7 +1510,25 @@ function Auth({ mode = "login", prompt, redirect }) {
                 "One profile. Four spaces for what comes next.",
               )}
           </p>
-          <form onSubmit={submit}>
+          {sent && (
+            <div className="auth-sent" role="status" data-testid="signup-check-email">
+              <p>
+                {L(
+                  "تحقّق من بريدك الإلكتروني لتكمل. إذا كان لديك حساب بهذا البريد، فسجّل الدخول أو أعد تعيين كلمة المرور.",
+                  "Check your email to continue. If you already have an account with this address, sign in or reset your password.",
+                )}
+              </p>
+              <p>
+                <Link className="button button-dark" to="/login">
+                  {L("تسجيل الدخول", "Sign in")}
+                </Link>{" "}
+                <Link className="text-link" to="/forgot-password">
+                  {L("نسيت كلمة المرور؟", "Forgot your password?")}
+                </Link>
+              </p>
+            </div>
+          )}
+          <form onSubmit={submit} hidden={sent}>
             {(signup || PREVIEW_MODE) && (
               <label>
                 {L("الاسم الكامل", "Full name")}
@@ -2131,6 +2151,7 @@ function Feed({ savedOnly = false }) {
           unsupported_file_type: L("نوع الملف غير مدعوم", "Unsupported file type"),
           file_too_large: L("الصورة كبيرة جدًا", "Image is too large"),
           invalid_image: L("تعذّر قراءة الصورة", "Could not read the image"),
+          unsupported_image: L("هذا الملف ليس صورة مدعومة. استخدم JPEG أو PNG أو WebP أو GIF.", "This file is not a supported image. Use JPEG, PNG, WebP or GIF."),
           upload_limit_reached: L("وصلت للحد اليومي للرفع", "Daily upload limit reached"),
         }[err.message] || err.message,
       );
@@ -3545,6 +3566,7 @@ function AvatarCard() {
       setToast(
         {
           invalid_image: L("تعذر قراءة الصورة", "Could not read that image"),
+          unsupported_image: L("هذا الملف ليس صورة مدعومة. استخدم JPEG أو PNG أو WebP أو GIF.", "This file is not a supported image. Use JPEG, PNG, WebP or GIF."),
           file_too_large: L("الصورة كبيرة جدًا", "Image is too large"),
         }[err.message] || err.message,
       );

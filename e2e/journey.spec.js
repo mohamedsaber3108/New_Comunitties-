@@ -70,6 +70,16 @@ test.describe.serial("member journey through the real UI", () => {
     await expect(page.getByRole("status").filter({ hasText: /email_verification_required|verify/i })).toBeVisible();
   });
 
+  test("signing up again with the same email shows the same neutral message and creates nothing", async ({ page }) => {
+    await page.goto("/signup");
+    await page.getByLabel("Full name").fill("Someone Else");
+    await page.getByLabel("Email address").fill(email);
+    await page.getByLabel("Password").fill("abcdef1234");
+    await page.locator("button.auth-submit").click();
+    await expect(page.getByTestId("signup-check-email")).toBeVisible();
+    await expect(page).not.toHaveURL(/\/home/);
+  });
+
   test("verify via the emailed link -> banner gone -> join -> post appears in feed", async ({ page }) => {
     await logIn(page, { email });
     const token = await emailToken(email, "verifyEmail");

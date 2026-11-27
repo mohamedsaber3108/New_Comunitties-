@@ -655,18 +655,43 @@ app.post("/api/v1/auth/signup", async (req, res, next) => {
     // Enforce the shared password policy (letters + digits, length).
     const policy = validatePassword(password);
     if (!policy.ok) return fail(res, 400, "invalid_signup");
-    if (await User.findOne({ where: { email } }))
-      return fail(res, 409, "email_taken");
+    // Neutral reply (no email enumeration): a new and an existing address get
+    // the same 202 and no session. The member signs in after reading the mail.
+    const neutral = () => res.status(202).json({ ok: true, next: "check_email" });
+    const existing = await User.findOne({ where: { email } });
+    if (existing) {
+      await hashPassword(password); // similar timing to a real sign-up
+      try {
+        await enqueueEmail(existing.email, "signupAttemptExisting", {
+          name: existing.name,
+          loginLink: `${config.frontendUrl}/login`,
+          resetLink: `${config.frontendUrl}/forgot-password`,
+        });
+      } catch (mailErr) {
+        logger.warn("signup.existing_notice_enqueue_failed", {
+          userId: existing.id,
+          error: String(mailErr),
+        });
+      }
+      return neutral();
+    }
     const username = "u" + crypto.randomBytes(6).toString("hex");
-    const user = await User.create({
-      name,
-      email,
-      username,
-      passwordHash: await hashPassword(password),
-      persona,
-      authProvider: "password",
-      passwordChangedAt: new Date(),
-    });
+    let user;
+    try {
+      user = await User.create({
+        name,
+        email,
+        username,
+        passwordHash: await hashPassword(password),
+        persona,
+        authProvider: "password",
+        passwordChangedAt: new Date(),
+      });
+    } catch (createErr) {
+      // Two sign-ups for one address at the same moment: same neutral reply.
+      if (createErr?.name === "SequelizeUniqueConstraintError") return neutral();
+      throw createErr;
+    }
     // Issue and email a verification link via the durable outbox.
     try {
       const raw = await issueVerificationToken(
@@ -685,12 +710,7 @@ app.post("/api/v1/auth/signup", async (req, res, next) => {
         error: String(mailErr),
       });
     }
-    const token = await issueSession(Session, user.id, req);
-    await user.update({ lastLoginAt: new Date() });
-    res
-      .cookie(SESSION_COOKIE, token, cookieOptions())
-      .status(201)
-      .json({ user: selfUser(user) });
+    neutral();
   } catch (e) {
     next(e);
   }

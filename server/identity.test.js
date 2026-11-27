@@ -8,7 +8,7 @@ import path from "node:path";
 import fs from "node:fs";
 process.env.NODE_ENV = "test";
 process.env.DB_DIALECT = process.env.TEST_DB_DIALECT || "sqlite";
-const { prepareTestDatabase } = await import("./test-support.js");
+const { prepareTestDatabase, signupLogin } = await import("./test-support.js");
 const dropTestDb = await prepareTestDatabase();
 process.env.REQUIRE_EMAIL_VERIFICATION = "true";
 process.env.WORKER_ENABLED = "false"; // drive the outbox manually in tests
@@ -67,21 +67,38 @@ after(async () => {
   fs.rmSync(temp, { recursive: true, force: true });
 });
 
+test("signing up with an existing email: same reply, nothing created, owner is emailed", async () => {
+  const body = { name: "Dup Person", email: "dup@example.test", password: "abcdef1234", persona: "launchpad" };
+  const first = await req("/auth/signup", "POST", body);
+  const again = await req("/auth/signup", "POST", { ...body, name: "Attacker" });
+  assert.equal(first.status, 202);
+  assert.equal(again.status, 202);
+  assert.deepEqual(again.body, first.body);
+  assert.equal(again.cookie, undefined);
+  assert.equal(await User.count({ where: { email: "dup@example.test" } }), 1);
+  const notices = (await OutboxMessage.findAll({ where: { kind: "email" } }))
+    .map((r) => JSON.parse(r.payload))
+    .filter((p) => p.to === "dup@example.test" && p.template === "signupAttemptExisting");
+  assert.equal(notices.length, 1);
+  assert.match(notices[0].args.loginLink, /\/login$/);
+  assert.match(notices[0].args.resetLink, /\/forgot-password$/);
+});
+
 test("signup issues an unverified account and enqueues a verification email", async () => {
-  const r = await req("/auth/signup", "POST", {
+  const r = await signupLogin(req, {
     name: "Verify Me",
     email: "verify@example.test",
     password: "abcdef1234",
     persona: "launchpad",
   });
-  assert.equal(r.status, 201);
+  assert.equal(r.status, 200);
   assert.equal(r.body.user.emailVerified, false);
   const link = await latestEmailLink("verify@example.test");
   assert.ok(link && link.includes("/verify-email?token="));
 });
 
 test("unverified accounts are blocked from verified-only actions but can read", async () => {
-  const s = await req("/auth/signup", "POST", {
+  const s = await signupLogin(req, {
     name: "Gate Tester",
     email: "gate@example.test",
     password: "abcdef1234",
@@ -111,7 +128,7 @@ test("unverified accounts are blocked from verified-only actions but can read", 
 });
 
 test("weak passwords are rejected at signup", async () => {
-  const r = await req("/auth/signup", "POST", {
+  const r = await signupLogin(req, {
     name: "Weak",
     email: "weak@example.test",
     password: "allletters", // no digit

@@ -14,7 +14,7 @@ import crypto from "node:crypto";
 
 process.env.NODE_ENV = "test";
 process.env.DB_DIALECT = process.env.TEST_DB_DIALECT || "sqlite";
-const { prepareTestDatabase } = await import("./test-support.js");
+const { prepareTestDatabase, signupLogin } = await import("./test-support.js");
 const dropTestDb = await prepareTestDatabase();
 process.env.REQUIRE_EMAIL_VERIFICATION = "false";
 process.env.WORKER_ENABLED = "false";
@@ -64,7 +64,7 @@ async function req(route, method = "GET", body, cookie, headers = {}) {
   return { status: r.status, body: await r.json().catch(() => ({})), cookie: r.headers.get("set-cookie")?.split(";")[0] };
 }
 async function signup(email) {
-  return (await req("/auth/signup", "POST", { name: "Pay " + email, email, password: "abcdef1234", persona: "launchpad" })).cookie;
+  return (await signupLogin(req, { name: "Pay " + email, email, password: "abcdef1234", persona: "launchpad" })).cookie;
 }
 
 // Build a Paymob-style signed webhook for a transaction.
