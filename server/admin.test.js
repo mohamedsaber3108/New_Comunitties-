@@ -16,7 +16,8 @@ process.env.WORKER_ENABLED = "false";
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "usam-admin-"));
 process.env.SQLITE_PATH = path.join(temp, "db.sqlite");
 
-const { initDb, sequelize, User, Session, ContactRequest, Report, Post } = await import("./db.js");
+const { initDb, sequelize, User, Session, ContactRequest, Report, Post, Subscription, Plan, Perk, PerkApplication } =
+  await import("./db.js");
 const { default: app } = await import("./index.js");
 
 let server, base, adminCookie, memberCookie, superCookie;
@@ -379,16 +380,72 @@ test("T-21: admin queues page through 120+ rows with no duplicates, even on equa
   // The reports queue uses the same paging (moderator route).
   const post = await Post.findOne();
   assert.ok(post, "an earlier test created a post to report");
-  {
-    await Report.bulkCreate(Array.from({ length: 60 }, (_, i) => ({ PostId: post.id, reason: `r${i}`, createdAt: same })));
-    const first = await req("/admin/reports?limit=50", "GET", null, adminCookie);
-    assert.equal(first.status, 200);
-    assert.equal(first.body.items.length, 50);
-    assert.ok(first.body.nextCursor);
-    const second = await req(`/admin/reports?limit=50&cursor=${encodeURIComponent(first.body.nextCursor)}`, "GET", null, adminCookie);
-    const ids = new Set([...first.body.items, ...second.body.items].map((x) => x.id));
-    assert.equal(ids.size, first.body.items.length + second.body.items.length);
-  }
+  await Report.bulkCreate(Array.from({ length: 60 }, (_, i) => ({ PostId: post.id, reason: `r${i}`, createdAt: same })));
+  const first = await req("/admin/reports?limit=50", "GET", null, adminCookie);
+  assert.equal(first.status, 200);
+  assert.equal(first.body.items.length, 50);
+  assert.ok(first.body.nextCursor);
+  const second = await req(`/admin/reports?limit=50&cursor=${encodeURIComponent(first.body.nextCursor)}`, "GET", null, adminCookie);
+  const ids = new Set([...first.body.items, ...second.body.items].map((x) => x.id));
+  assert.equal(ids.size, first.body.items.length + second.body.items.length);
+});
+
+// Walks every page of a keyset-paged admin route; returns the ids in order.
+async function walk(route) {
+  const order = [];
+  let cursor = null, pages = 0;
+  do {
+    const r = await req(`${route}?limit=25${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`, "GET", null, adminCookie);
+    assert.equal(r.status, 200);
+    order.push(...r.body.items.map((x) => x.id));
+    cursor = r.body.nextCursor;
+    assert.equal(r.body.hasMore, !!cursor);
+    pages++;
+  } while (cursor && pages < 20);
+  return order;
+}
+
+test("T-21 slice 2: pending subscriptions and perk applications page oldest first past the old caps", async () => {
+  const same = new Date(Date.now() - 7200_000);
+  const stamp = (i) => (i < 20 ? same : new Date(Date.now() - 7200_000 + (i + 1) * 60_000));
+  const plan = await Plan.create({ code: "pager", nameAr: "صفحات", nameEn: "Pager", monthlyEgp: 100, yearlyEgp: 1000 });
+  const users = await User.bulkCreate(
+    Array.from({ length: 120 }, (_, i) => ({ name: `Sub ${i}`, username: `subpager${i}`, email: `subpager${i}@example.test`, passwordHash: "x" })),
+  );
+  // 120 pending subscriptions (old cap was 100), 20 on one timestamp.
+  await Subscription.bulkCreate(
+    users.map((u, i) => ({ UserId: u.id, PlanId: plan.id, billingCycle: "monthly", status: "pending_payment", amountEgp: 100, createdAt: stamp(i) })),
+  );
+  const subs = await walk("/admin/subscriptions");
+  assert.equal(new Set(subs).size, subs.length, "no duplicate across pages");
+  assert.equal(subs.length, await Subscription.count({ where: { status: "pending_payment" } }));
+  const subRows = await Subscription.findAll({ where: { id: subs } });
+  const at = new Map(subRows.map((s) => [s.id, s.createdAt.getTime()]));
+  for (let i = 1; i < subs.length; i++) assert.ok(at.get(subs[i - 1]) <= at.get(subs[i]), "oldest first");
+  // The API shape the admin page reads is kept.
+  const one = await req("/admin/subscriptions?limit=1", "GET", null, adminCookie);
+  assert.ok(one.body.items[0].user && one.body.items[0].plan && one.body.items[0].amountEgp === 100);
+  assert.equal((await req("/admin/subscriptions?cursor=bad", "GET", null, adminCookie)).status, 400);
+
+  // 210 perk applications (old cap was 200): one perk per 10 users, unique per pair.
+  const perks = await Perk.bulkCreate(
+    Array.from({ length: 2 }, (_, i) => ({
+      slug: `pager-perk-${i}`, provider: "P", providerGroup: "usam", product: "p", category: "c",
+      titleAr: "t", titleEn: "t", summaryAr: "s", summaryEn: "s",
+    })),
+  );
+  await PerkApplication.bulkCreate(
+    users.slice(0, 105).flatMap((u, i) =>
+      perks.map((p) => ({ PerkId: p.id, UserId: u.id, startupName: "S", stage: "idea", useCase: "u", createdAt: stamp(i) })),
+    ),
+  );
+  const apps = await walk("/admin/perk-applications");
+  assert.equal(new Set(apps).size, apps.length, "no duplicate across pages");
+  assert.equal(apps.length, await PerkApplication.count());
+  assert.ok(apps.length > 200, "past the old cap of 200");
+  const page1 = await req("/admin/perk-applications?limit=1", "GET", null, adminCookie);
+  assert.ok(page1.body.items[0].Perk && page1.body.items[0].User, "perk and member still included");
+  assert.equal((await req("/admin/perk-applications?cursor=bad", "GET", null, adminCookie)).status, 400);
 });
 
 test("A-03: role change signs the target out of every session", async () => {
